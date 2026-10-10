@@ -13,6 +13,16 @@ const PUBLIC = path.join(HERE, 'public');
 const started = Date.now();
 
 const OPENAI_URL = 'https://api.openai.com/v1/images/generations';
+// The models the page offers. A request naming anything else is refused, so
+// the page cannot be used to bill a model that is not listed here.
+const MODELS = [
+  'gpt-image-1-mini',
+  'gpt-image-1',
+  'gpt-image-1.5',
+  'gpt-image-2',
+  'gpt-image-2.5-flare',
+  'gpt-image-2.5-sunburst',
+];
 const MAX_BODY = 16 * 1024;
 const MAX_PROMPT = 4000;
 // A dithered 240x240 PNG is tens of kilobytes; base64 and JSON add a third.
@@ -117,7 +127,7 @@ async function saveDithered(req, res, { imagesDir }) {
   }
 }
 
-async function generate(req, res, { apiKey, model, quality, imagesDir, fetchImpl }) {
+async function generate(req, res, { apiKey, models, model: defaultModel, quality, imagesDir, fetchImpl }) {
   if (!apiKey) return send(res, 503, { error: 'OPENAI_API_KEY is not set on the server' });
 
   let body;
@@ -129,6 +139,8 @@ async function generate(req, res, { apiKey, model, quality, imagesDir, fetchImpl
   const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
   if (!prompt) return send(res, 400, { error: 'prompt is required' });
   if (prompt.length > MAX_PROMPT) return send(res, 400, { error: `prompt is longer than ${MAX_PROMPT} characters` });
+  const model = body.model === undefined ? defaultModel : body.model;
+  if (!models.includes(model)) return send(res, 400, { error: `model must be one of: ${models.join(', ')}` });
 
   try {
     // The API has no 240x240 size; the smallest square is requested and the
@@ -154,6 +166,9 @@ async function generate(req, res, { apiKey, model, quality, imagesDir, fetchImpl
 }
 
 export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', imagesDir = '', fetchImpl = fetch } = {}) {
+  // OPENAI_IMAGE_MODEL may name a model that is not in the list; offer it too.
+  const models = MODELS.includes(model) ? MODELS : [model, ...MODELS];
+
   return http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
 
@@ -173,12 +188,12 @@ export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', qual
     }
 
     if (url.pathname === '/api/info') {
-      return send(res, 200, { name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, ready: Boolean(apiKey) });
+      return send(res, 200, { name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, models, ready: Boolean(apiKey) });
     }
 
     if (url.pathname === '/api/generate') {
       if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
-      return generate(req, res, { apiKey, model, quality, imagesDir, fetchImpl });
+      return generate(req, res, { apiKey, models, model, quality, imagesDir, fetchImpl });
     }
 
     if (url.pathname === '/api/dithered') {

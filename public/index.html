@@ -34,6 +34,9 @@
       <label>Prompt
         <textarea id="prompt" placeholder="a red fox sitting under a yellow moon"></textarea>
       </label>
+      <label>Image model
+        <select id="model"></select>
+      </label>
       <label>Panel palette
         <select id="palette"></select>
       </label>
@@ -194,7 +197,7 @@
       $('go').disabled = true;
       $('status').textContent = 'generating… this can take a minute';
       try {
-        const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed }) });
+        const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed, model: $('model').value || undefined }) });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const img = await load('data:image/png;base64,' + data.image);
@@ -216,6 +219,9 @@
       event.preventDefault();
       convert(file);
     });
+    $('model').addEventListener('change', () => {
+      try { localStorage.setItem('model', $('model').value); } catch {}
+    });
     $('palette').addEventListener('change', render);
     $('dither').addEventListener('change', render);
 
@@ -223,7 +229,12 @@
       .then((r) => r.json())
       .then((d) => {
         if (d.error) throw new Error(d.error);
-        $('info').textContent = d.ready ? `${SIZE}×${SIZE} images via ${d.model}` : 'OPENAI_API_KEY is not set on the server';
+        $('info').textContent = d.ready ? `${SIZE}×${SIZE} colored e-ink images` : 'OPENAI_API_KEY is not set on the server';
+        for (const model of d.models) $('model').add(new Option(model, model));
+        // Start on the last model picked in this browser, else the server's default.
+        let remembered = null;
+        try { remembered = localStorage.getItem('model'); } catch {}
+        $('model').value = d.models.includes(remembered) ? remembered : d.model;
       })
       .catch((e) => { $('info').textContent = e.message; });
   </script>

@@ -72,6 +72,23 @@ test('generate sends the prompt upstream and returns the image', async () => {
   });
 });
 
+test('generate uses the model the page picked, and only a listed one', async () => {
+  const sent = [];
+  const fetchImpl = async (url, init) => {
+    sent.push(JSON.parse(init.body).model);
+    return new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  };
+  await withServer({ apiKey: 'sk-test', fetchImpl }, async (base) => {
+    const info = await (await fetch(`${base}/api/info`)).json();
+    assert.equal(info.model, 'gpt-image-1');
+    assert.ok(info.models.includes('gpt-image-2'));
+
+    assert.equal((await generate(base, { prompt: 'a fox', model: 'gpt-image-2' })).status, 200);
+    assert.equal((await generate(base, { prompt: 'a fox', model: 'dall-e-3' })).status, 400);
+    assert.deepEqual(sent, ['gpt-image-2']);
+  });
+});
+
 test('generate stores the image and its prompt when given a folder', async () => {
   const imagesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
   const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });

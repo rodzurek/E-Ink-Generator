@@ -55,7 +55,7 @@ logged. Nothing is ever deleted, so clear the folder yourself.
 | Variable               | Default       | Meaning                                        |
 | ---------------------- | ------------- | ---------------------------------------------- |
 | `OPENAI_API_KEY`       | —             | required; without it `/api/generate` answers 503 |
-| `OPENAI_IMAGE_MODEL`   | `gpt-image-1` | any image model that returns `b64_json`        |
+| `OPENAI_IMAGE_MODEL`   | `gpt-image-1` | the model the page starts on; the picklist is `MODELS` in `server.js` |
 | `OPENAI_IMAGE_QUALITY` | `low`         | `low`, `medium` or `high`; low is plenty at 240px |
 | `IMAGES_DIR`           | `images`      | where generations are stored; relative to the app folder |
 | `TOKEN`                | —             | see **Token** below                            |
