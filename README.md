@@ -26,7 +26,8 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
 
 ## Converting your own image
 
-**Or convert your own image** takes any picture the browser can open, crops it
+**Or convert your own image** takes any picture the browser can open, picked
+as a file or pasted with Ctrl+V anywhere on the page, crops it
 to a centered square, scales it to 240x240 and renders it with the same palette
 and dither settings. It costs nothing: OpenAI is not called. The conversion
 happens in the browser and the file never reaches the server, so it is not

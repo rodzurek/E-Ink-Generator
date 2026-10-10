@@ -46,7 +46,7 @@
         <span class="muted" id="status"></span>
       </div>
 
-      <label>Or convert your own image
+      <label>Or convert your own image — pick a file, or paste one with Ctrl+V
         <input type="file" id="upload" accept="image/*" />
       </label>
 
@@ -169,8 +169,7 @@
       render();
     }
 
-    async function upload() {
-      const file = $('upload').files[0];
+    async function convert(file) {
       if (!file) return;
       const url = URL.createObjectURL(file);
       try {
@@ -209,7 +208,14 @@
     }
 
     $('go').addEventListener('click', generate);
-    $('upload').addEventListener('change', upload);
+    $('upload').addEventListener('change', () => convert($('upload').files[0]));
+    // Ctrl+V anywhere on the page. Pasted text is left alone so the prompt box still works.
+    document.addEventListener('paste', (event) => {
+      const file = [...event.clipboardData.files].find((f) => f.type.startsWith('image/'));
+      if (!file) return;
+      event.preventDefault();
+      convert(file);
+    });
     $('palette').addEventListener('change', render);
     $('dither').addEventListener('change', render);
 
