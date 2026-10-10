@@ -15,6 +15,7 @@
     label { display: block; margin-top: 1rem; }
     textarea, select { box-sizing: border-box; width: 100%; margin-top: 0.25rem; padding: 0.5rem; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
     textarea { min-height: 6rem; resize: vertical; }
+    input[type="file"] { display: block; margin-top: 0.25rem; font: inherit; color: inherit; max-width: 100%; }
     label.check { display: flex; gap: 0.5rem; align-items: center; }
     .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
     button, a.button { font: inherit; padding: 0.5rem 1rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; }
@@ -44,6 +45,10 @@
         <a class="button" id="download" download="eink-240x240.png" hidden>Download PNG</a>
         <span class="muted" id="status"></span>
       </div>
+
+      <label>Or convert your own image
+        <input type="file" id="upload" accept="image/*" />
+      </label>
 
       <canvas id="out" width="240" height="240"></canvas>
     </div>
@@ -140,13 +145,42 @@
         .catch((e) => { $('status').textContent = `${SIZE}x${SIZE} copy not saved: ${e.message}`; });
     }
 
-    function load(base64) {
+    function load(src) {
       return new Promise((resolve, reject) => {
         const img = new Image();
         img.onload = () => resolve(img);
         img.onerror = () => reject(new Error('could not decode the image'));
-        img.src = 'data:image/png;base64,' + base64;
+        img.src = src;
       });
+    }
+
+    // Scales an image onto the panel's pixels and renders it. Anything not
+    // square is center-cropped, and transparency becomes white like the paper.
+    function show(img, name) {
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      const left = (img.naturalWidth - side) / 2;
+      const top = (img.naturalHeight - side) / 2;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, SIZE, SIZE);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, left, top, side, side, 0, 0, SIZE, SIZE);
+      source = ctx.getImageData(0, 0, SIZE, SIZE);
+      savedName = name;
+      render();
+    }
+
+    async function upload() {
+      const file = $('upload').files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      try {
+        show(await load(url), null);
+        $('status').textContent = 'converted in the browser, not stored on the server';
+      } catch (e) {
+        $('status').textContent = e.message;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
     }
 
     async function generate() {
@@ -164,13 +198,9 @@
         const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed }) });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        const img = await load(data.image);
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, SIZE, SIZE);
-        source = ctx.getImageData(0, 0, SIZE, SIZE);
-        savedName = data.saved;
+        const img = await load('data:image/png;base64,' + data.image);
         $('status').textContent = '';
-        render();
+        show(img, data.saved);
       } catch (e) {
         $('status').textContent = e.message;
       } finally {
@@ -179,6 +209,7 @@
     }
 
     $('go').addEventListener('click', generate);
+    $('upload').addEventListener('change', upload);
     $('palette').addEventListener('change', render);
     $('dither').addEventListener('change', render);
 

@@ -24,6 +24,14 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
    pure colors (black `000000`, white `ffffff`, red `ff0000`, yellow `ffff00`,
    blue `0000ff`, green `00ff00`, orange `ff8000`).
 
+## Converting your own image
+
+**Or convert your own image** takes any picture the browser can open, crops it
+to a centered square, scales it to 240x240 and renders it with the same palette
+and dither settings. It costs nothing: OpenAI is not called. The conversion
+happens in the browser and the file never reaches the server, so it is not
+stored in `images/`; use **Download PNG** to keep the result.
+
 ## Stored images
 
 Every generation is written to `images/` (git-ignored) as three files with the
