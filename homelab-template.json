@@ -1,11 +1,11 @@
 {
-  "name": "my-app",
-  "description": "Starter Node app from local/template — rename and point repo at your copy",
+  "name": "e-ink-generator",
+  "description": "Generates 240x240 colored e-ink images with the OpenAI image API",
   "kind": "git",
-  "repo": "https://github.com/YOU/my-app.git",
+  "repo": "https://github.com/YOU/e-ink-generator.git",
   "setup": [],
   "exec": "node server.js",
-  "env": "APP_NAME=my-app\n# TOKEN=change-me",
+  "env": "APP_NAME=e-ink-generator\nOPENAI_API_KEY=sk-change-me\n# OPENAI_IMAGE_MODEL=gpt-image-1\n# OPENAI_IMAGE_QUALITY=low\n# TOKEN=change-me",
   "port": 8090,
   "health": "/api/health"
 }

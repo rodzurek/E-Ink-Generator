@@ -1,25 +1,53 @@
-# Homelab app template
+# E-Ink Generator
 
-A starting point for an app you install from the dashboard with **Install app →
-git**. Node 18+, standard library only, so the install needs no setup commands
-and nothing to build. It runs as a systemd **user** unit the agent writes for
-you, which needs no root and no sudoers line.
+Type a prompt, get a 240x240 image reduced to the colors of a colored e-ink
+panel. Built on the homelab app template: Node 18+, standard library only, so
+the install needs no setup commands and nothing to build. It runs as a systemd
+**user** unit the agent writes for you, which needs no root and no sudoers line.
 
 ```
-server.js           the app: static files from public/, /api/health, optional TOKEN
-public/index.html   the page; replace it with yours
+server.js           static files from public/, /api/health, /api/generate, optional TOKEN
+public/index.html   the page: prompt, palette, downscale and dither, PNG download
 server.test.mjs     node --test, run with `npm test`
 homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill the dialog
 ```
 
-## Make it yours
+## How it works
 
-1. Copy this folder into a new repo and push it (GitHub, Gitea, anything the node
-   can clone over https or ssh).
-2. Replace `public/` and extend `server.js`. Keep `/api/health` answering
-   `{ ok, uptime }` and nothing more: the dashboard probes it from the node,
-   outside the token check.
-3. `npm test` before pushing.
+1. The page posts the prompt to `/api/generate`.
+2. The server calls the OpenAI image API with `OPENAI_API_KEY`, so the key never
+   reaches the browser. The API has no 240x240 size, so it asks for 1024x1024.
+3. The page scales the result to 240x240 on a canvas and maps every pixel to the
+   chosen panel palette, with Floyd–Steinberg dithering unless you turn it off.
+   Changing the palette or the dither re-renders without another API call.
+4. **Download PNG** saves the 240x240 result. It contains only the palette's
+   pure colors (black `000000`, white `ffffff`, red `ff0000`, yellow `ffff00`,
+   blue `0000ff`, green `00ff00`, orange `ff8000`).
+
+## Environment
+
+| Variable               | Default       | Meaning                                        |
+| ---------------------- | ------------- | ---------------------------------------------- |
+| `OPENAI_API_KEY`       | —             | required; without it `/api/generate` answers 503 |
+| `OPENAI_IMAGE_MODEL`   | `gpt-image-1` | any image model that returns `b64_json`        |
+| `OPENAI_IMAGE_QUALITY` | `low`         | `low`, `medium` or `high`; low is plenty at 240px |
+| `TOKEN`                | —             | see **Token** below                            |
+| `PORT`                 | `8090`        |                                                |
+
+Each generation is billed to the key. Set `TOKEN` if the app is reachable by
+anyone you would not hand the key to.
+
+## Run it locally
+
+Copy `.env.example` to `.env` (it is git-ignored), fill in the key, then:
+
+```
+npm start
+```
+
+The server reads `.env` itself on Node 20.12+. Restart it after editing `.env`.
+
+`npm test` runs the tests; they stub the OpenAI call and spend nothing.
 
 ## Install it from the dashboard
 
@@ -30,16 +58,16 @@ In **Install app**, pick kind **git** and fill:
 
 | Field          | Value                                   |
 | -------------- | --------------------------------------- |
-| Name           | `my-app` (letters, digits, `.` `_` `-`) |
-| Repo           | `https://github.com/you/my-app.git`     |
+| Name           | `e-ink-generator` (letters, digits, `.` `_` `-`) |
+| Repo           | `https://github.com/you/e-ink-generator.git` |
 | Setup          | leave empty — there are no dependencies |
 | Start command  | `node server.js`                        |
-| Environment    | `APP_NAME=my-app`, and `TOKEN=…` if you want one |
+| Environment    | `OPENAI_API_KEY=…`, and `TOKEN=…` if you want one |
 | Port           | `8090`                                  |
 | Health         | `/api/health`                           |
 
 The agent clones into the install root, writes
-`~/.config/systemd/user/my-app.service` with `PORT=8090` set from the port field,
+`~/.config/systemd/user/e-ink-generator.service` with `PORT=8090` set from the port field,
 enables it, and writes the app's `homelab.json`. The card turns green once
 `/api/health` answers.
 
@@ -60,7 +88,7 @@ the dialog's template list. Or fill the form once and press **Save as template**
   private repo fails at once rather than hanging.
 - **The repo's own `homelab.json` is replaced** by the one the dialog writes, so
   do not rely on shipping one. Edit it on the node afterwards if you want an
-  `update` list, e.g. `["git pull --ff-only", "systemctl --user restart my-app"]`.
+  `update` list, e.g. `["git pull --ff-only", "systemctl --user restart e-ink-generator"]`.
 - **Setup commands** run with `bash -lc` in the checkout. If you add npm
   dependencies later, put `npm ci --omit=dev` there.
 - **Line endings.** `.gitattributes` keeps everything LF; a CRLF shebang or

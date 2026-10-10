@@ -35,6 +35,49 @@ test('no token configured means open', async () => {
   });
 });
 
+function generate(base, body) {
+  return fetch(`${base}/api/generate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+test('generate refuses without an API key or a prompt', async () => {
+  await withServer({}, async (base) => {
+    assert.equal((await generate(base, { prompt: 'a fox' })).status, 503);
+  });
+  await withServer({ apiKey: 'sk-test' }, async (base) => {
+    assert.equal((await generate(base, { prompt: '  ' })).status, 400);
+    assert.equal((await fetch(`${base}/api/generate`)).status, 405);
+  });
+});
+
+test('generate sends the prompt upstream and returns the image', async () => {
+  let sent;
+  const fetchImpl = async (url, init) => {
+    sent = { url, auth: init.headers.authorization, body: JSON.parse(init.body) };
+    return new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  };
+  await withServer({ apiKey: 'sk-test', model: 'gpt-image-1', fetchImpl }, async (base) => {
+    const res = await generate(base, { prompt: 'a fox' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { image: 'aGVsbG8=' });
+    assert.equal(sent.auth, 'Bearer sk-test');
+    assert.equal(sent.body.prompt, 'a fox');
+    assert.equal(sent.body.model, 'gpt-image-1');
+  });
+});
+
+test('generate passes an upstream error message through as 502', async () => {
+  const fetchImpl = async () => new Response(JSON.stringify({ error: { message: 'billing limit' } }), { status: 400 });
+  await withServer({ apiKey: 'sk-test', fetchImpl }, async (base) => {
+    const res = await generate(base, { prompt: 'a fox' });
+    assert.equal(res.status, 502);
+    assert.equal((await res.json()).error, 'billing limit');
+  });
+});
+
 test('paths cannot climb out of public/', async () => {
   await withServer({}, async (base) => {
     assert.equal((await fetch(`${base}/..%2fserver.js`)).status, 404);

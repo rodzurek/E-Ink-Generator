@@ -3,37 +3,172 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Homelab app</title>
+  <title>E-Ink Generator</title>
   <style>
-    :root { color-scheme: light dark; --bg: #f6f7f9; --fg: #1d2330; --muted: #667085; --card: #fff; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #11151c; --fg: #e6e9ef; --muted: #98a2b3; --card: #1a202a; } }
+    :root { color-scheme: light dark; --bg: #f6f7f9; --fg: #1d2330; --muted: #667085; --card: #fff; --line: #d0d5dd; --accent: #2563eb; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #11151c; --fg: #e6e9ef; --muted: #98a2b3; --card: #1a202a; --line: #344054; --accent: #5b8def; } }
     body { margin: 0; font: 16px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
     main { max-width: 40rem; margin: 3rem auto; padding: 0 16px; }
     .card { background: var(--card); border-radius: 12px; padding: 1.25rem 1.5rem; }
     .muted { color: var(--muted); }
-    code { font-size: 0.9em; }
+    h1 { margin: 0; }
+    label { display: block; margin-top: 1rem; }
+    textarea, select { box-sizing: border-box; width: 100%; margin-top: 0.25rem; padding: 0.5rem; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+    textarea { min-height: 6rem; resize: vertical; }
+    label.check { display: flex; gap: 0.5rem; align-items: center; }
+    .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
+    button, a.button { font: inherit; padding: 0.5rem 1rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    a.button[hidden] { display: none; }
+    /* 240 real pixels, shown at 2x so the dither is visible. */
+    canvas { display: block; margin-top: 1rem; width: 480px; max-width: 100%; aspect-ratio: 1; image-rendering: pixelated; border: 1px solid var(--line); background: #fff; }
   </style>
 </head>
 <body>
   <main>
     <div class="card">
-      <h1 id="name">Homelab app</h1>
+      <h1>E-Ink Generator</h1>
       <p class="muted" id="info">loading…</p>
-      <p>Replace <code>public/</code> and <code>server.js</code> with your app. Keep
-        <code>/api/health</code> answering and the dashboard card stays green.</p>
+
+      <label>Prompt
+        <textarea id="prompt" placeholder="a red fox sitting under a yellow moon"></textarea>
+      </label>
+      <label>Panel palette
+        <select id="palette"></select>
+      </label>
+      <label class="check"><input type="checkbox" id="hint" checked /> Ask the model for flat, high-contrast art in the panel's colors</label>
+      <label class="check"><input type="checkbox" id="dither" checked /> Dither (Floyd–Steinberg)</label>
+
+      <div class="row">
+        <button id="go">Generate</button>
+        <a class="button" id="download" download="eink-240x240.png" hidden>Download PNG</a>
+        <span class="muted" id="status"></span>
+      </div>
+
+      <canvas id="out" width="240" height="240"></canvas>
     </div>
   </main>
   <script>
+    const SIZE = 240;
+    // Pure primaries, the values e-ink converters and drivers map to panel inks.
+    const INK = {
+      black: [0, 0, 0], white: [255, 255, 255], red: [255, 0, 0], yellow: [255, 255, 0],
+      blue: [0, 0, 255], green: [0, 255, 0], orange: [255, 128, 0],
+    };
+    const PALETTES = {
+      'Spectra 6 — black, white, red, yellow, blue, green': ['black', 'white', 'red', 'yellow', 'blue', 'green'],
+      'ACeP 7 — black, white, red, yellow, blue, green, orange': ['black', 'white', 'red', 'yellow', 'blue', 'green', 'orange'],
+      '4-color — black, white, red, yellow': ['black', 'white', 'red', 'yellow'],
+      '3-color — black, white, red': ['black', 'white', 'red'],
+      '3-color — black, white, yellow': ['black', 'white', 'yellow'],
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const canvas = $('out');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // The undithered 240x240 pixels, kept so palette and dither changes do not cost another API call.
+    let source = null;
+
+    for (const label of Object.keys(PALETTES)) $('palette').add(new Option(label, label));
+
     // Carry the token through, so API calls work when the page was opened with ?token=.
     const token = new URLSearchParams(location.search).get('token');
-    fetch('/api/info' + (token ? '?token=' + encodeURIComponent(token) : ''))
+    const headers = { 'content-type': 'application/json', ...(token ? { 'x-token': token } : {}) };
+
+    function inks() {
+      return PALETTES[$('palette').value];
+    }
+
+    function nearest(colors, r, g, b) {
+      let best = colors[0];
+      let bestDistance = Infinity;
+      for (const c of colors) {
+        const distance = (r - c[0]) ** 2 + (g - c[1]) ** 2 + (b - c[2]) ** 2;
+        if (distance < bestDistance) { bestDistance = distance; best = c; }
+      }
+      return best;
+    }
+
+    function render() {
+      if (!source) return;
+      const colors = inks().map((name) => INK[name]);
+      const dither = $('dither').checked;
+      const px = new Float32Array(source.data);
+      const out = new ImageData(SIZE, SIZE);
+      for (let y = 0; y < SIZE; y++) {
+        for (let x = 0; x < SIZE; x++) {
+          const i = (y * SIZE + x) * 4;
+          const c = nearest(colors, px[i], px[i + 1], px[i + 2]);
+          for (let k = 0; k < 3; k++) {
+            out.data[i + k] = c[k];
+            if (!dither) continue;
+            const error = px[i + k] - c[k];
+            if (x + 1 < SIZE) px[i + 4 + k] += error * 7 / 16;
+            if (y + 1 < SIZE) {
+              if (x > 0) px[i + SIZE * 4 - 4 + k] += error * 3 / 16;
+              px[i + SIZE * 4 + k] += error * 5 / 16;
+              if (x + 1 < SIZE) px[i + SIZE * 4 + 4 + k] += error * 1 / 16;
+            }
+          }
+          out.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(out, 0, 0);
+      canvas.toBlob((blob) => {
+        const link = $('download');
+        if (link.href) URL.revokeObjectURL(link.href);
+        link.href = URL.createObjectURL(blob);
+        link.hidden = false;
+      }, 'image/png');
+    }
+
+    function load(base64) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('could not decode the image'));
+        img.src = 'data:image/png;base64,' + base64;
+      });
+    }
+
+    async function generate() {
+      let prompt = $('prompt').value.trim();
+      if (!prompt) { $('status').textContent = 'write a prompt first'; return; }
+      if ($('hint').checked) {
+        const subject = prompt.replace(/[.!\s]+$/, '');
+        const colors = inks().join(', ').replace(/, ([^,]+)$/, ', and $1');
+        prompt = `Create a square image of ${subject} optimized for a ${SIZE}x${SIZE} pixel color e-ink display. Use only ${colors}. Render in a flat graphic style with solid fills, thick outlines, bold simple shapes, and high contrast. No gradients, no realistic lighting, no shadows, no textures, no fine detail, and no text. Show one clear main subject, large and centered, with a simple uncluttered background and strong negative space. Ensure the image remains clear and recognizable at very low resolution.`;
+      }
+      $('go').disabled = true;
+      $('status').textContent = 'generating… this can take a minute';
+      try {
+        const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt }) });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        const img = await load(data.image);
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, SIZE, SIZE);
+        source = ctx.getImageData(0, 0, SIZE, SIZE);
+        render();
+        $('status').textContent = '';
+      } catch (e) {
+        $('status').textContent = e.message;
+      } finally {
+        $('go').disabled = false;
+      }
+    }
+
+    $('go').addEventListener('click', generate);
+    $('palette').addEventListener('change', render);
+    $('dither').addEventListener('change', render);
+
+    fetch('/api/info', { headers })
       .then((r) => r.json())
       .then((d) => {
         if (d.error) throw new Error(d.error);
-        document.getElementById('name').textContent = d.name;
-        document.getElementById('info').textContent = 'running on Node ' + d.node;
+        $('info').textContent = d.ready ? `${SIZE}×${SIZE} images via ${d.model}` : 'OPENAI_API_KEY is not set on the server';
       })
-      .catch((e) => { document.getElementById('info').textContent = e.message; });
+      .catch((e) => { $('info').textContent = e.message; });
   </script>
 </body>
 </html>

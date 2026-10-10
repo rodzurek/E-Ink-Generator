@@ -1,4 +1,5 @@
-// Starter app for the homelab dashboard's "Install app → git" path.
+// E-ink image generator: proxies prompts to the OpenAI image API so the key
+// stays on the server. The page does the 240x240 downscale and palette dither.
 // Node's standard library only, so the install needs no setup commands at all.
 
 import http from 'node:http';
@@ -10,6 +11,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, 'public');
 const started = Date.now();
+
+const OPENAI_URL = 'https://api.openai.com/v1/images/generations';
+const MAX_BODY = 16 * 1024;
+const MAX_PROMPT = 4000;
+// Image generation is slow; give up before a proxy in front of us does.
+const UPSTREAM_TIMEOUT_MS = 180_000;
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -33,7 +40,65 @@ function tokenMatches(given, wanted) {
   return crypto.timingSafeEqual(a, b);
 }
 
-export function createApp({ token = '' } = {}) {
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      } catch {
+        reject(new Error('body must be JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+async function generate(req, res, { apiKey, model, quality, fetchImpl }) {
+  if (!apiKey) return send(res, 503, { error: 'OPENAI_API_KEY is not set on the server' });
+
+  let body;
+  try {
+    body = await readJson(req);
+  } catch (e) {
+    return send(res, 400, { error: e.message });
+  }
+  const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+  if (!prompt) return send(res, 400, { error: 'prompt is required' });
+  if (prompt.length > MAX_PROMPT) return send(res, 400, { error: `prompt is longer than ${MAX_PROMPT} characters` });
+
+  try {
+    // The API has no 240x240 size; the smallest square is requested and the
+    // page scales it down.
+    const upstream = await fetchImpl(OPENAI_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, prompt, size: '1024x1024', quality, n: 1 }),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    const data = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      return send(res, 502, { error: data?.error?.message || `OpenAI answered ${upstream.status}` });
+    }
+    const image = data?.data?.[0]?.b64_json;
+    if (!image) return send(res, 502, { error: 'OpenAI returned no image' });
+    return send(res, 200, { image });
+  } catch (e) {
+    return send(res, 502, { error: e.name === 'TimeoutError' ? 'OpenAI took too long to answer' : e.message });
+  }
+}
+
+export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', fetchImpl = fetch } = {}) {
   return http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
 
@@ -53,7 +118,12 @@ export function createApp({ token = '' } = {}) {
     }
 
     if (url.pathname === '/api/info') {
-      return send(res, 200, { name: process.env.APP_NAME || 'template', node: process.version });
+      return send(res, 200, { name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, ready: Boolean(apiKey) });
+    }
+
+    if (url.pathname === '/api/generate') {
+      if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+      return generate(req, res, { apiKey, model, quality, fetchImpl });
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'GET only' });
@@ -71,9 +141,20 @@ export function createApp({ token = '' } = {}) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  // Local runs: pick up .env next to this file however the server was started.
+  // Variables already in the environment win, and a missing file (the homelab
+  // install) or a Node older than 20.12 is fine.
+  try {
+    process.loadEnvFile?.(path.join(HERE, '.env'));
+  } catch {}
   const port = Number(process.env.PORT || 8090);
   const host = process.env.HOST || '0.0.0.0';
-  const server = createApp({ token: process.env.TOKEN || '' });
+  const server = createApp({
+    token: process.env.TOKEN || '',
+    apiKey: process.env.OPENAI_API_KEY || '',
+    model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
+    quality: process.env.OPENAI_IMAGE_QUALITY || 'low',
+  });
   server.on('error', (e) => {
     console.error(e.code === 'EADDRINUSE' ? `port ${port} is already taken — set PORT to a free one` : e.message);
     process.exit(1);
