@@ -15,6 +15,11 @@ const started = Date.now();
 const OPENAI_URL = 'https://api.openai.com/v1/images/generations';
 const MAX_BODY = 16 * 1024;
 const MAX_PROMPT = 4000;
+// A dithered 240x240 PNG is tens of kilobytes; base64 and JSON add a third.
+const MAX_DITHERED_BODY = 512 * 1024;
+// What saveImage names a generation: an ISO timestamp with - for : and . plus six hex digits.
+const SAVED_NAME = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{6}$/;
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 // Image generation is slow; give up before a proxy in front of us does.
 const UPSTREAM_TIMEOUT_MS = 180_000;
 
@@ -40,13 +45,13 @@ function tokenMatches(given, wanted) {
   return crypto.timingSafeEqual(a, b);
 }
 
-function readJson(req) {
+function readJson(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY) {
+      if (size > limit) {
         reject(new Error('request body too large'));
         req.destroy();
         return;
@@ -64,7 +69,55 @@ function readJson(req) {
   });
 }
 
-async function generate(req, res, { apiKey, model, quality, fetchImpl }) {
+// Writes <stamp>.png (the 1024x1024 original) and <stamp>.json (the prompt and
+// settings) side by side. Returns the base name, or null when saving is off or
+// failed: a generation that was paid for is still returned to the page.
+async function saveImage(imagesDir, image, meta) {
+  if (!imagesDir) return null;
+  const name = `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
+  try {
+    await fs.promises.mkdir(imagesDir, { recursive: true });
+    await fs.promises.writeFile(path.join(imagesDir, `${name}.png`), Buffer.from(image, 'base64'));
+    await fs.promises.writeFile(path.join(imagesDir, `${name}.json`), JSON.stringify(meta, null, 2) + '\n');
+    return name;
+  } catch (e) {
+    console.error(`could not save image to ${imagesDir}: ${e.message}`);
+    return null;
+  }
+}
+
+// The page dithers, so it sends the 240x240 result back to sit next to the
+// original as <stamp>-240.png. The name must be one saveImage produced and
+// still be on disk, so this can only add a file beside an existing generation.
+async function saveDithered(req, res, { imagesDir }) {
+  if (!imagesDir) return send(res, 404, { error: 'image storage is off' });
+
+  let body;
+  try {
+    body = await readJson(req, MAX_DITHERED_BODY);
+  } catch (e) {
+    return send(res, 400, { error: e.message });
+  }
+  const name = typeof body.name === 'string' ? body.name : '';
+  if (!SAVED_NAME.test(name)) return send(res, 400, { error: 'name is not a stored image' });
+  const png = Buffer.from(typeof body.image === 'string' ? body.image : '', 'base64');
+  if (!png.subarray(0, 8).equals(PNG_MAGIC)) return send(res, 400, { error: 'image must be a base64 PNG' });
+
+  try {
+    await fs.promises.access(path.join(imagesDir, `${name}.png`));
+  } catch {
+    return send(res, 404, { error: 'name is not a stored image' });
+  }
+  try {
+    await fs.promises.writeFile(path.join(imagesDir, `${name}-240.png`), png);
+    return send(res, 200, { saved: `${name}-240.png` });
+  } catch (e) {
+    console.error(`could not save image to ${imagesDir}: ${e.message}`);
+    return send(res, 500, { error: 'could not write the image' });
+  }
+}
+
+async function generate(req, res, { apiKey, model, quality, imagesDir, fetchImpl }) {
   if (!apiKey) return send(res, 503, { error: 'OPENAI_API_KEY is not set on the server' });
 
   let body;
@@ -92,13 +145,15 @@ async function generate(req, res, { apiKey, model, quality, fetchImpl }) {
     }
     const image = data?.data?.[0]?.b64_json;
     if (!image) return send(res, 502, { error: 'OpenAI returned no image' });
-    return send(res, 200, { image });
+    const subject = typeof body.subject === 'string' ? body.subject.trim().slice(0, MAX_PROMPT) : '';
+    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), subject, prompt, model, quality });
+    return send(res, 200, { image, saved });
   } catch (e) {
     return send(res, 502, { error: e.name === 'TimeoutError' ? 'OpenAI took too long to answer' : e.message });
   }
 }
 
-export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', fetchImpl = fetch } = {}) {
+export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', imagesDir = '', fetchImpl = fetch } = {}) {
   return http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
 
@@ -123,7 +178,12 @@ export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', qual
 
     if (url.pathname === '/api/generate') {
       if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
-      return generate(req, res, { apiKey, model, quality, fetchImpl });
+      return generate(req, res, { apiKey, model, quality, imagesDir, fetchImpl });
+    }
+
+    if (url.pathname === '/api/dithered') {
+      if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+      return saveDithered(req, res, { imagesDir });
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'GET only' });
@@ -154,6 +214,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     apiKey: process.env.OPENAI_API_KEY || '',
     model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
     quality: process.env.OPENAI_IMAGE_QUALITY || 'low',
+    imagesDir: path.resolve(HERE, process.env.IMAGES_DIR || 'images'),
   });
   server.on('error', (e) => {
     console.error(e.code === 'EADDRINUSE' ? `port ${port} is already taken — set PORT to a free one` : e.message);

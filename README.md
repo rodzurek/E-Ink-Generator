@@ -6,7 +6,7 @@ the install needs no setup commands and nothing to build. It runs as a systemd
 **user** unit the agent writes for you, which needs no root and no sudoers line.
 
 ```
-server.js           static files from public/, /api/health, /api/generate, optional TOKEN
+server.js           static files from public/, /api/health, /api/generate, /api/dithered, optional TOKEN
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
 server.test.mjs     node --test, run with `npm test`
 homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill the dialog
@@ -24,6 +24,23 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
    pure colors (black `000000`, white `ffffff`, red `ff0000`, yellow `ffff00`,
    blue `0000ff`, green `00ff00`, orange `ff8000`).
 
+## Stored images
+
+Every generation is written to `images/` (git-ignored) as three files with the
+same timestamped name:
+
+- `.png` — the 1024x1024 original from OpenAI, before scaling and dithering,
+  so it can be re-rendered for any palette later
+- `-240.png` — the 240x240 dithered result, the same file **Download PNG**
+  gives. The page sends it back through `/api/dithered` after rendering, and
+  again when the palette or dither setting changes, so it always holds the
+  last render and earlier ones are overwritten.
+- `.json` — `created`, `subject` (what was typed), `prompt` (what was sent),
+  `model`, `quality`
+
+If the folder cannot be written the image is still returned and the reason is
+logged. Nothing is ever deleted, so clear the folder yourself.
+
 ## Environment
 
 | Variable               | Default       | Meaning                                        |
@@ -31,6 +48,7 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
 | `OPENAI_API_KEY`       | —             | required; without it `/api/generate` answers 503 |
 | `OPENAI_IMAGE_MODEL`   | `gpt-image-1` | any image model that returns `b64_json`        |
 | `OPENAI_IMAGE_QUALITY` | `low`         | `low`, `medium` or `high`; low is plenty at 240px |
+| `IMAGES_DIR`           | `images`      | where generations are stored; relative to the app folder |
 | `TOKEN`                | —             | see **Token** below                            |
 | `PORT`                 | `8090`        |                                                |
 

@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createApp } from './server.js';
 
 async function withServer(options, fn) {
@@ -62,11 +65,57 @@ test('generate sends the prompt upstream and returns the image', async () => {
   await withServer({ apiKey: 'sk-test', model: 'gpt-image-1', fetchImpl }, async (base) => {
     const res = await generate(base, { prompt: 'a fox' });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { image: 'aGVsbG8=' });
+    assert.deepEqual(await res.json(), { image: 'aGVsbG8=', saved: null });
     assert.equal(sent.auth, 'Bearer sk-test');
     assert.equal(sent.body.prompt, 'a fox');
     assert.equal(sent.body.model, 'gpt-image-1');
   });
+});
+
+test('generate stores the image and its prompt when given a folder', async () => {
+  const imagesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
+  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  try {
+    await withServer({ apiKey: 'sk-test', imagesDir, fetchImpl }, async (base) => {
+      const { saved } = await (await generate(base, { prompt: 'Create a fox', subject: 'a fox' })).json();
+      assert.deepEqual((await fs.readdir(imagesDir)).sort(), [`${saved}.json`, `${saved}.png`]);
+      assert.equal(await fs.readFile(path.join(imagesDir, `${saved}.png`), 'utf8'), 'hello');
+      const meta = JSON.parse(await fs.readFile(path.join(imagesDir, `${saved}.json`), 'utf8'));
+      assert.equal(meta.prompt, 'Create a fox');
+      assert.equal(meta.subject, 'a fox');
+    });
+  } finally {
+    await fs.rm(imagesDir, { recursive: true, force: true });
+  }
+});
+
+test('dithered copy is stored beside its original and nowhere else', async () => {
+  const imagesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
+  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('pixels')]);
+  const dithered = (base, body) => fetch(`${base}/api/dithered`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  try {
+    await withServer({ apiKey: 'sk-test', imagesDir, fetchImpl }, async (base) => {
+      const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+      const image = png.toString('base64');
+
+      const res = await dithered(base, { name: saved, image });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { saved: `${saved}-240.png` });
+      assert.deepEqual(await fs.readFile(path.join(imagesDir, `${saved}-240.png`)), png);
+
+      assert.equal((await dithered(base, { name: '../server', image })).status, 400);
+      assert.equal((await dithered(base, { name: saved, image: 'aGVsbG8=' })).status, 400);
+      assert.equal((await dithered(base, { name: '2000-01-01T00-00-00-000Z-abcdef', image })).status, 404);
+      assert.equal((await fs.readdir(imagesDir)).length, 3);
+    });
+  } finally {
+    await fs.rm(imagesDir, { recursive: true, force: true });
+  }
 });
 
 test('generate passes an upstream error message through as 502', async () => {
