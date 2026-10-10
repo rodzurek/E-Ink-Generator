@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>E-Ink Generator</title>
+  <meta name="theme-color" content="#11151c" />
+  <!-- use-credentials: behind a login in front of the app, the manifest request must carry its cookie. -->
+  <link rel="manifest" id="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+  <link rel="icon" id="icon" type="image/png" href="/icon-192.png" />
   <style>
     :root { color-scheme: light dark; --bg: #f6f7f9; --fg: #1d2330; --muted: #667085; --card: #fff; --line: #d0d5dd; --accent: #2563eb; }
     @media (prefers-color-scheme: dark) { :root { --bg: #11151c; --fg: #e6e9ef; --muted: #98a2b3; --card: #1a202a; --line: #344054; --accent: #5b8def; } }
@@ -15,10 +19,15 @@
     label { display: block; margin-top: 1rem; }
     textarea, select { box-sizing: border-box; width: 100%; margin-top: 0.25rem; padding: 0.5rem; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
     textarea { min-height: 6rem; resize: vertical; }
-    input[type="file"] { display: block; margin-top: 0.25rem; font: inherit; color: inherit; max-width: 100%; }
+    p.own { margin: 1.25rem 0 0; }
+    .row.own { margin-top: 0.5rem; }
+    label.button { display: inline-block; margin-top: 0; }
+    label.button:focus-within { outline: 2px solid var(--fg); outline-offset: 2px; }
+    /* The label is the button; the input stays focusable but out of sight. */
+    input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
     label.check { display: flex; gap: 0.5rem; align-items: center; }
     .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
-    button, a.button { font: inherit; padding: 0.5rem 1rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; }
+    button, a.button, label.button { font: inherit; padding: 0.5rem 1rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; }
     button:disabled { opacity: 0.5; cursor: default; }
     a.button[hidden] { display: none; }
     /* 240 real pixels, shown at 2x so the dither is visible. */
@@ -49,9 +58,15 @@
         <span class="muted" id="status"></span>
       </div>
 
-      <label>Or convert your own image — pick a file, or paste one with Ctrl+V
-        <input type="file" id="upload" accept="image/*" />
-      </label>
+      <p class="muted own">Or convert your own image — on a computer you can also paste one with Ctrl+V</p>
+      <div class="row own">
+        <label class="button">Take photo
+          <input type="file" id="camera" accept="image/*" capture="environment" />
+        </label>
+        <label class="button">Choose image
+          <input type="file" id="upload" accept="image/*" />
+        </label>
+      </div>
 
       <canvas id="out" width="240" height="240"></canvas>
     </div>
@@ -78,12 +93,16 @@
     let source = null;
     // The name the server stored that generation under, or null if it stored nothing.
     let savedName = null;
+    // What OpenAI reported for the generation on screen, as text for the status line.
+    let usageNote = '';
 
     for (const label of Object.keys(PALETTES)) $('palette').add(new Option(label, label));
 
     // Carry the token through, so API calls work when the page was opened with ?token=.
     const token = new URLSearchParams(location.search).get('token');
     const headers = { 'content-type': 'application/json', ...(token ? { 'x-token': token } : {}) };
+    // The browser fetches these two itself, so the token has to ride in their URLs.
+    if (token) for (const id of ['manifest', 'icon']) $(id).href += '?token=' + encodeURIComponent(token);
 
     function inks() {
       return PALETTES[$('palette').value];
@@ -143,7 +162,7 @@
         .then((r) => r.json())
         .then((d) => {
           if (d.error) throw new Error(d.error);
-          if (name === savedName) $('status').textContent = `saved as ${d.saved}`;
+          if (name === savedName) $('status').textContent = [`saved as ${d.saved}`, usageNote].filter(Boolean).join(' · ');
         })
         .catch((e) => { $('status').textContent = `${SIZE}x${SIZE} copy not saved: ${e.message}`; });
     }
@@ -172,8 +191,15 @@
       render();
     }
 
+    function describeUsage(usage) {
+      if (!usage || typeof usage.total_tokens !== 'number') return '';
+      const count = (n) => Number(n || 0).toLocaleString();
+      return `${count(usage.total_tokens)} tokens (${count(usage.input_tokens)} in, ${count(usage.output_tokens)} out)`;
+    }
+
     async function convert(file) {
       if (!file) return;
+      usageNote = '';
       const url = URL.createObjectURL(file);
       try {
         show(await load(url), null);
@@ -201,7 +227,8 @@
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const img = await load('data:image/png;base64,' + data.image);
-        $('status').textContent = '';
+        usageNote = describeUsage(data.usage);
+        $('status').textContent = usageNote;
         show(img, data.saved);
       } catch (e) {
         $('status').textContent = e.message;
@@ -211,7 +238,13 @@
     }
 
     $('go').addEventListener('click', generate);
-    $('upload').addEventListener('change', () => convert($('upload').files[0]));
+    for (const id of ['camera', 'upload']) {
+      $(id).addEventListener('change', () => {
+        convert($(id).files[0]);
+        // Cleared so that choosing the same picture again still fires a change.
+        $(id).value = '';
+      });
+    }
     // Ctrl+V anywhere on the page. Pasted text is left alone so the prompt box still works.
     document.addEventListener('paste', (event) => {
       const file = [...event.clipboardData.files].find((f) => f.type.startsWith('image/'));

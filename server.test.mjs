@@ -65,7 +65,7 @@ test('generate sends the prompt upstream and returns the image', async () => {
   await withServer({ apiKey: 'sk-test', model: 'gpt-image-1', fetchImpl }, async (base) => {
     const res = await generate(base, { prompt: 'a fox' });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { image: 'aGVsbG8=', saved: null });
+    assert.deepEqual(await res.json(), { image: 'aGVsbG8=', saved: null, usage: null });
     assert.equal(sent.auth, 'Bearer sk-test');
     assert.equal(sent.body.prompt, 'a fox');
     assert.equal(sent.body.model, 'gpt-image-1');
@@ -91,15 +91,18 @@ test('generate uses the model the page picked, and only a listed one', async () 
 
 test('generate stores the image and its prompt when given a folder', async () => {
   const imagesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
-  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  const reported = { total_tokens: 1372, input_tokens: 100, output_tokens: 1272 };
+  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }], usage: reported }), { status: 200 });
   try {
     await withServer({ apiKey: 'sk-test', imagesDir, fetchImpl }, async (base) => {
-      const { saved } = await (await generate(base, { prompt: 'Create a fox', subject: 'a fox' })).json();
+      const { saved, usage } = await (await generate(base, { prompt: 'Create a fox', subject: 'a fox' })).json();
+      assert.deepEqual(usage, reported);
       assert.deepEqual((await fs.readdir(imagesDir)).sort(), [`${saved}.json`, `${saved}.png`]);
       assert.equal(await fs.readFile(path.join(imagesDir, `${saved}.png`), 'utf8'), 'hello');
       const meta = JSON.parse(await fs.readFile(path.join(imagesDir, `${saved}.json`), 'utf8'));
       assert.equal(meta.prompt, 'Create a fox');
       assert.equal(meta.subject, 'a fox');
+      assert.deepEqual(meta.usage, reported);
     });
   } finally {
     await fs.rm(imagesDir, { recursive: true, force: true });
@@ -141,6 +144,24 @@ test('generate passes an upstream error message through as 502', async () => {
     const res = await generate(base, { prompt: 'a fox' });
     assert.equal(res.status, 502);
     assert.equal((await res.json()).error, 'billing limit');
+  });
+});
+
+test('manifest carries the token so the installed app opens signed in', async () => {
+  await withServer({ token: 'secret' }, async (base) => {
+    assert.equal((await fetch(`${base}/manifest.webmanifest`)).status, 401);
+    const res = await fetch(`${base}/manifest.webmanifest?token=secret`);
+    assert.match(res.headers.get('content-type'), /^application\/manifest\+json/);
+    const manifest = await res.json();
+    assert.equal(manifest.start_url, '/?token=secret');
+    for (const icon of manifest.icons) {
+      const png = await fetch(base + icon.src);
+      assert.equal(png.status, 200);
+      assert.equal(png.headers.get('content-type'), 'image/png');
+    }
+  });
+  await withServer({}, async (base) => {
+    assert.equal((await (await fetch(`${base}/manifest.webmanifest`)).json()).start_url, '/');
   });
 });
 

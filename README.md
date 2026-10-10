@@ -8,6 +8,7 @@ the install needs no setup commands and nothing to build. It runs as a systemd
 ```
 server.js           static files from public/, /api/health, /api/generate, /api/dithered, optional TOKEN
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
+public/icon-*.png   app icons for the Android install
 server.test.mjs     node --test, run with `npm test`
 homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill the dialog
 ```
@@ -24,10 +25,23 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
    pure colors (black `000000`, white `ffffff`, red `ff0000`, yellow `ffff00`,
    blue `0000ff`, green `00ff00`, orange `ff8000`).
 
+## Install on Android
+
+Open the site in Chrome on the phone, then menu → **Add to Home screen** →
+**Install**. It then opens full screen from its own icon, like an app.
+
+Chrome only offers **Install** over `https` (or on `localhost`), so this needs
+the public address; over plain `http` on the LAN it only offers a shortcut.
+With `TOKEN` set, open the page with `?token=` before installing: the token is
+written into the installed app's start address, so changing `TOKEN` later means
+installing again. There is no service worker, so the app needs the server to be
+reachable and never shows a stale page.
+
 ## Converting your own image
 
-**Or convert your own image** takes any picture the browser can open, picked
-as a file or pasted with Ctrl+V anywhere on the page, crops it
+**Take photo** opens the phone's camera and **Choose image** its photo library
+or files; on a computer both open the file picker, and Ctrl+V anywhere on the
+page pastes an image. Any picture the browser can open works. The page crops it
 to a centered square, scales it to 240x240 and renders it with the same palette
 and dither settings. It costs nothing: OpenAI is not called. The conversion
 happens in the browser and the file never reaches the server, so it is not
@@ -45,7 +59,9 @@ same timestamped name:
   again when the palette or dither setting changes, so it always holds the
   last render and earlier ones are overwritten.
 - `.json` — `created`, `subject` (what was typed), `prompt` (what was sent),
-  `model`, `quality`
+  `model`, `quality`, and `usage`: the token counts OpenAI reported for that
+  generation (`total_tokens`, `input_tokens`, `output_tokens`), or `null` if
+  the model reported none. The page shows the same counts after generating.
 
 If the folder cannot be written the image is still returned and the reason is
 logged. Nothing is ever deleted, so clear the folder yourself.

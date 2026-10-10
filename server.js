@@ -158,8 +158,10 @@ async function generate(req, res, { apiKey, models, model: defaultModel, quality
     const image = data?.data?.[0]?.b64_json;
     if (!image) return send(res, 502, { error: 'OpenAI returned no image' });
     const subject = typeof body.subject === 'string' ? body.subject.trim().slice(0, MAX_PROMPT) : '';
-    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), subject, prompt, model, quality });
-    return send(res, 200, { image, saved });
+    // Token counts as OpenAI reports them; null from a model that reports none.
+    const usage = data.usage && typeof data.usage === 'object' ? data.usage : null;
+    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), subject, prompt, model, quality, usage });
+    return send(res, 200, { image, saved, usage });
   } catch (e) {
     return send(res, 502, { error: e.name === 'TimeoutError' ? 'OpenAI took too long to answer' : e.message });
   }
@@ -189,6 +191,27 @@ export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', qual
 
     if (url.pathname === '/api/info') {
       return send(res, 200, { name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, models, ready: Boolean(apiKey) });
+    }
+
+    // Built here, not a file in public/: Android fetches the icons and opens
+    // start_url on its own, so with TOKEN set each of those URLs must carry it.
+    if (url.pathname === '/manifest.webmanifest') {
+      const carry = token ? `?token=${encodeURIComponent(token)}` : '';
+      return send(res, 200, {
+        name: 'E-Ink Generator',
+        short_name: 'E-Ink',
+        description: 'Generate and convert images for a 240x240 colored e-ink display',
+        start_url: `/${carry}`,
+        scope: '/',
+        display: 'standalone',
+        background_color: '#11151c',
+        theme_color: '#11151c',
+        icons: [
+          { src: `/icon-192.png${carry}`, sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: `/icon-512.png${carry}`, sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: `/icon-512.png${carry}`, sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+        ],
+      }, 'application/manifest+json; charset=utf-8');
     }
 
     if (url.pathname === '/api/generate') {
