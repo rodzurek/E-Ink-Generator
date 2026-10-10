@@ -1,0 +1,11 @@
+{
+  "name": "my-app",
+  "description": "Starter Node app from local/template — rename and point repo at your copy",
+  "kind": "git",
+  "repo": "https://github.com/YOU/my-app.git",
+  "setup": [],
+  "exec": "node server.js",
+  "env": "APP_NAME=my-app\n# TOKEN=change-me",
+  "port": 8090,
+  "health": "/api/health"
+}

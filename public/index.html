@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Homelab app</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f6f7f9; --fg: #1d2330; --muted: #667085; --card: #fff; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #11151c; --fg: #e6e9ef; --muted: #98a2b3; --card: #1a202a; } }
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+    main { max-width: 40rem; margin: 3rem auto; padding: 0 16px; }
+    .card { background: var(--card); border-radius: 12px; padding: 1.25rem 1.5rem; }
+    .muted { color: var(--muted); }
+    code { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1 id="name">Homelab app</h1>
+      <p class="muted" id="info">loading…</p>
+      <p>Replace <code>public/</code> and <code>server.js</code> with your app. Keep
+        <code>/api/health</code> answering and the dashboard card stays green.</p>
+    </div>
+  </main>
+  <script>
+    // Carry the token through, so API calls work when the page was opened with ?token=.
+    const token = new URLSearchParams(location.search).get('token');
+    fetch('/api/info' + (token ? '?token=' + encodeURIComponent(token) : ''))
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) throw new Error(d.error);
+        document.getElementById('name').textContent = d.name;
+        document.getElementById('info').textContent = 'running on Node ' + d.node;
+      })
+      .catch((e) => { document.getElementById('info').textContent = e.message; });
+  </script>
+</body>
+</html>
