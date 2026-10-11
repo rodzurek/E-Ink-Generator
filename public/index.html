@@ -49,7 +49,9 @@
       <label>Panel palette
         <select id="palette"></select>
       </label>
-      <label class="check"><input type="checkbox" id="hint" checked /> Ask the model for flat, high-contrast art in the panel's colors</label>
+      <label>Style
+        <select id="style"></select>
+      </label>
       <label class="check"><input type="checkbox" id="dither" checked /> Dither (Floyd–Steinberg)</label>
 
       <div class="row">
@@ -86,6 +88,23 @@
       '3-color — black, white, yellow': ['black', 'white', 'yellow'],
     };
 
+    // What goes in front of the shared panel rules; [SUBJECT] is the text typed.
+    // RAW has no entry here: the typed text is sent exactly as written.
+    const RAW = 'No style — send my text as written';
+    const STYLES = {
+      'Flat graphic': 'Create a square image of [SUBJECT] in a clean flat graphic style, with one clear main subject, large and centered.',
+      'Bob Ross landscape': 'Create a simple landscape scene of [SUBJECT] in a Bob Ross–inspired style, with happy little trees, layered mountains, soft nature composition, and a peaceful outdoor feeling. Use large simplified shapes and a calm scenic layout.',
+      'Anime': 'Create an image of [SUBJECT] in a simple anime-inspired style with bold outlines, expressive features, stylized hair, and clean graphic shapes. Keep the design cute, readable, and uncluttered, with one clear central subject.',
+      'Pixel art': 'Create a pixel-art style image of [SUBJECT] with a retro video game feel. Use blocky forms, simplified geometry, and a clear iconic silhouette. Keep the subject large and centered with a minimal background.',
+      'Cartoon mascot': 'Create a cartoon mascot illustration of [SUBJECT] with a friendly, playful personality. Use rounded forms, bold outlines, and simple facial features. Make the subject large, centered, and instantly recognizable.',
+      'Japanese poster': 'Create an image of [SUBJECT] in a simplified Japanese poster-inspired style, using elegant composition, bold silhouettes, stylized natural elements, and balanced negative space. Keep the design minimal and striking.',
+      'Vintage travel poster': 'Create a vintage travel poster–inspired image of [SUBJECT] with bold graphic shapes, simplified scenery, and a strong poster-like composition. Avoid small details and keep the scene clean and eye-catching.',
+      'Children’s book': 'Create a children’s book–inspired illustration of [SUBJECT] with simple charming shapes, a warm playful mood, and a clean storybook composition. Keep the image friendly, uncluttered, and easy to read at small size.',
+      'Minimal icon': 'Create a minimal icon-style image of [SUBJECT] using very large simple shapes, a strong silhouette, and an ultra-clean composition. Keep the background minimal and emphasize clarity over detail.',
+      'Comic book': 'Create a comic book–inspired image of [SUBJECT] with bold outlines, dramatic simplified shapes, and strong visual contrast. Keep the composition dynamic but uncluttered, with one clear focal subject.',
+      'Sticker / vinyl decal': 'Create a sticker-style illustration of [SUBJECT] with thick outlines, flat color areas, simplified shapes, and a clean cutout look. Keep the subject large and centered with little or no background detail.',
+    };
+
     const $ = (id) => document.getElementById(id);
     const canvas = $('out');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -97,6 +116,12 @@
     let usageNote = '';
 
     for (const label of Object.keys(PALETTES)) $('palette').add(new Option(label, label));
+    for (const label of [...Object.keys(STYLES), RAW]) $('style').add(new Option(label, label));
+    // Start on the last style picked in this browser.
+    try {
+      const remembered = localStorage.getItem('style');
+      if (remembered === RAW || STYLES[remembered]) $('style').value = remembered;
+    } catch {}
 
     // Carry the token through, so API calls work when the page was opened with ?token=.
     const token = new URLSearchParams(location.search).get('token');
@@ -215,15 +240,17 @@
       let prompt = $('prompt').value.trim();
       if (!prompt) { $('status').textContent = 'write a prompt first'; return; }
       const typed = prompt;
-      if ($('hint').checked) {
+      const style = $('style').value;
+      if (STYLES[style]) {
         const subject = prompt.replace(/[.!\s]+$/, '');
         const colors = inks().join(', ').replace(/, ([^,]+)$/, ', and $1');
-        prompt = `Create a square image of ${subject} optimized for a ${SIZE}x${SIZE} pixel color e-ink display. Use only ${colors}. Render in a flat graphic style with solid fills, thick outlines, bold simple shapes, and high contrast. No gradients, no realistic lighting, no shadows, no textures, no fine detail, and no text. Show one clear main subject, large and centered, with a simple uncluttered background and strong negative space. Ensure the image remains clear and recognizable at very low resolution.`;
+        // Every style ends with the same rules for the panel.
+        prompt = `${STYLES[style].replace('[SUBJECT]', () => subject)}\n\nOptimized for a ${SIZE}x${SIZE} pixel color e-ink display. Use only ${colors}. Flat solid fills, bold simple shapes, thick outlines, high contrast, no gradients, no shadows, no textures, no fine detail, no text. Keep one main subject large and clear, with a simple uncluttered background and strong negative space. The image must remain recognizable after downscaling to ${SIZE}x${SIZE}.`;
       }
       $('go').disabled = true;
       $('status').textContent = 'generating… this can take a minute';
       try {
-        const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed, model: $('model').value || undefined }) });
+        const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed, style, model: $('model').value || undefined }) });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const img = await load('data:image/png;base64,' + data.image);
@@ -254,6 +281,9 @@
     });
     $('model').addEventListener('change', () => {
       try { localStorage.setItem('model', $('model').value); } catch {}
+    });
+    $('style').addEventListener('change', () => {
+      try { localStorage.setItem('style', $('style').value); } catch {}
     });
     $('palette').addEventListener('change', render);
     $('dither').addEventListener('change', render);

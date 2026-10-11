@@ -160,7 +160,8 @@ async function generate(req, res, { apiKey, models, model: defaultModel, quality
     const subject = typeof body.subject === 'string' ? body.subject.trim().slice(0, MAX_PROMPT) : '';
     // Token counts as OpenAI reports them; null from a model that reports none.
     const usage = data.usage && typeof data.usage === 'object' ? data.usage : null;
-    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), subject, prompt, model, quality, usage });
+    const style = typeof body.style === 'string' ? body.style.trim().slice(0, 100) : '';
+    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), subject, style, prompt, model, quality, usage });
     return send(res, 200, { image, saved, usage });
   } catch (e) {
     return send(res, 502, { error: e.name === 'TimeoutError' ? 'OpenAI took too long to answer' : e.message });

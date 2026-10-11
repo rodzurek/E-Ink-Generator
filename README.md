@@ -25,6 +25,16 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
    pure colors (black `000000`, white `ffffff`, red `ff0000`, yellow `ffff00`,
    blue `0000ff`, green `00ff00`, orange `ff8000`).
 
+## Styles
+
+The **Style** picklist wraps what you type as the subject of a style sentence
+(anime, pixel art, comic book, …) and ends every prompt with the same rules for
+the panel: its size, only the selected palette's colors, flat fills, thick
+outlines, no gradients, no text. Type the subject as a noun phrase, e.g. "a red
+fox under a yellow moon". **No style — send my text as written** sends exactly
+what was typed, with nothing added. The styles are `STYLES` in
+`public/index.html`.
+
 ## Install on Android
 
 Open the site in Chrome on the phone, then menu → **Add to Home screen** →
@@ -58,7 +68,8 @@ same timestamped name:
   gives. The page sends it back through `/api/dithered` after rendering, and
   again when the palette or dither setting changes, so it always holds the
   last render and earlier ones are overwritten.
-- `.json` — `created`, `subject` (what was typed), `prompt` (what was sent),
+- `.json` — `created`, `subject` (what was typed), `style` (the style
+  picked), `prompt` (what was sent),
   `model`, `quality`, and `usage`: the token counts OpenAI reported for that
   generation (`total_tokens`, `input_tokens`, `output_tokens`), or `null` if
   the model reported none. The page shows the same counts after generating.

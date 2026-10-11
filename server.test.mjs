@@ -95,13 +95,14 @@ test('generate stores the image and its prompt when given a folder', async () =>
   const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }], usage: reported }), { status: 200 });
   try {
     await withServer({ apiKey: 'sk-test', imagesDir, fetchImpl }, async (base) => {
-      const { saved, usage } = await (await generate(base, { prompt: 'Create a fox', subject: 'a fox' })).json();
+      const { saved, usage } = await (await generate(base, { prompt: 'Create a fox', subject: 'a fox', style: 'Anime' })).json();
       assert.deepEqual(usage, reported);
       assert.deepEqual((await fs.readdir(imagesDir)).sort(), [`${saved}.json`, `${saved}.png`]);
       assert.equal(await fs.readFile(path.join(imagesDir, `${saved}.png`), 'utf8'), 'hello');
       const meta = JSON.parse(await fs.readFile(path.join(imagesDir, `${saved}.json`), 'utf8'));
       assert.equal(meta.prompt, 'Create a fox');
       assert.equal(meta.subject, 'a fox');
+      assert.equal(meta.style, 'Anime');
       assert.deepEqual(meta.usage, reported);
     });
   } finally {
