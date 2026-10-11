@@ -90,8 +90,8 @@
     };
 
     // What goes in front of the shared panel rules; [SUBJECT] is the text typed.
-    // RAW has no entry here: the typed text is sent exactly as written.
-    const RAW = 'No style — send my text as written';
+    // There is deliberately no way to send the text bare: without the panel
+    // rules the result does not survive 240x240 and six inks.
     const STYLES = {
       'Flat graphic': 'Create a square image of [SUBJECT] in a clean flat graphic style, with one clear main subject, large and centered.',
       'Bob Ross landscape': 'Create a simple landscape scene of [SUBJECT] in a Bob Ross–inspired style, with happy little trees, layered mountains, soft nature composition, and a peaceful outdoor feeling. Use large simplified shapes and a calm scenic layout.',
@@ -117,11 +117,11 @@
     let usageNote = '';
 
     for (const label of Object.keys(PALETTES)) $('palette').add(new Option(label, label));
-    for (const label of [...Object.keys(STYLES), RAW]) $('style').add(new Option(label, label));
+    for (const label of Object.keys(STYLES)) $('style').add(new Option(label, label));
     // Start on the last style picked in this browser.
     try {
       const remembered = localStorage.getItem('style');
-      if (remembered === RAW || STYLES[remembered]) $('style').value = remembered;
+      if (STYLES[remembered]) $('style').value = remembered;
     } catch {}
 
     // Carry the token through, so API calls work when the page was opened with ?token=.
@@ -241,13 +241,11 @@
       let prompt = $('prompt').value.trim();
       if (!prompt) { $('status').textContent = 'write a prompt first'; return; }
       const typed = prompt;
-      const style = $('style').value;
-      if (STYLES[style]) {
-        const subject = prompt.replace(/[.!\s]+$/, '');
-        const colors = inks().join(', ').replace(/, ([^,]+)$/, ', and $1');
-        // Every style ends with the same rules for the panel.
-        prompt = `${STYLES[style].replace('[SUBJECT]', () => subject)}\n\nOptimized for a ${SIZE}x${SIZE} pixel color e-ink display. Use only ${colors}. Flat solid fills, bold simple shapes, thick outlines, high contrast, no gradients, no shadows, no textures, no fine detail, no text. Keep one main subject large and clear, with a simple uncluttered background and strong negative space. The image must remain recognizable after downscaling to ${SIZE}x${SIZE}.`;
-      }
+      const style = STYLES[$('style').value] ? $('style').value : Object.keys(STYLES)[0];
+      const subject = prompt.replace(/[.!\s]+$/, '');
+      const colors = inks().join(', ').replace(/, ([^,]+)$/, ', and $1');
+      // Every style ends with the same rules for the panel.
+      prompt = `${STYLES[style].replace('[SUBJECT]', () => subject)}\n\nOptimized for a ${SIZE}x${SIZE} pixel color e-ink display. Use only ${colors}. Flat solid fills, bold simple shapes, thick outlines, high contrast, no gradients, no shadows, no textures, no fine detail, no text. Keep one main subject large and clear, with a simple uncluttered background and strong negative space. The image must remain recognizable after downscaling to ${SIZE}x${SIZE}.`;
       $('go').disabled = true;
       $('status').textContent = 'generating… this can take a minute';
       try {

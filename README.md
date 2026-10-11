@@ -32,9 +32,9 @@ The **Style** picklist wraps what you type as the subject of a style sentence
 (anime, pixel art, comic book, …) and ends every prompt with the same rules for
 the panel: its size, only the selected palette's colors, flat fills, thick
 outlines, no gradients, no text. Type the subject as a noun phrase, e.g. "a red
-fox under a yellow moon". **No style — send my text as written** sends exactly
-what was typed, with nothing added. The styles are `STYLES` in
-`public/index.html`.
+fox under a yellow moon". There is no option to send the text bare: without
+the panel rules the result does not hold up on the display. The styles are
+`STYLES` in `public/index.html`.
 
 ## Install on Android
 
