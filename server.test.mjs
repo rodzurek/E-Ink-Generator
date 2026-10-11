@@ -139,6 +139,36 @@ test('dithered copy is stored beside its original and nowhere else', async () =>
   }
 });
 
+test('history lists stored generations newest first and serves only their images', async () => {
+  const imagesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
+  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  try {
+    await withServer({ apiKey: 'sk-test', imagesDir, fetchImpl }, async (base) => {
+      assert.deepEqual(await (await fetch(`${base}/api/generations`)).json(), { generations: [] });
+
+      const first = (await (await generate(base, { prompt: 'p1', subject: 'a fox', style: 'Anime' })).json()).saved;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = (await (await generate(base, { prompt: 'p2', subject: 'a cat' })).json()).saved;
+      await fs.writeFile(path.join(imagesDir, 'notes.json'), '{}');
+
+      const { generations } = await (await fetch(`${base}/api/generations`)).json();
+      assert.deepEqual(generations.map((g) => g.name), [second, first]);
+      assert.equal(generations[1].subject, 'a fox');
+      assert.equal(generations[1].style, 'Anime');
+      assert.equal(generations[1].dithered, false);
+
+      const png = await fetch(`${base}/api/images/${first}.png`);
+      assert.equal(png.headers.get('content-type'), 'image/png');
+      assert.equal(await png.text(), 'hello');
+      assert.equal((await fetch(`${base}/api/images/${first}-240.png`)).status, 404);
+      assert.equal((await fetch(`${base}/api/images/${first}.json`)).status, 404);
+      assert.equal((await fetch(`${base}/api/images/..%2fserver.js`)).status, 404);
+    });
+  } finally {
+    await fs.rm(imagesDir, { recursive: true, force: true });
+  }
+});
+
 test('generate passes an upstream error message through as 502', async () => {
   const fetchImpl = async () => new Response(JSON.stringify({ error: { message: 'billing limit' } }), { status: 400 });
   await withServer({ apiKey: 'sk-test', fetchImpl }, async (base) => {

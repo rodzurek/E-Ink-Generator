@@ -16,6 +16,7 @@
     .card { background: var(--card); border-radius: 12px; padding: 1.25rem 1.5rem; }
     .muted { color: var(--muted); }
     h1 { margin: 0; }
+    a { color: var(--accent); }
     label { display: block; margin-top: 1rem; }
     textarea, select { box-sizing: border-box; width: 100%; margin-top: 0.25rem; padding: 0.5rem; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
     textarea { min-height: 6rem; resize: vertical; }
@@ -38,7 +39,7 @@
   <main>
     <div class="card">
       <h1>E-Ink Generator</h1>
-      <p class="muted" id="info">loading…</p>
+      <p class="muted"><span id="info">loading…</span> · <a id="history" href="/history.html">History</a></p>
 
       <label>Prompt
         <textarea id="prompt" placeholder="a red fox sitting under a yellow moon"></textarea>
@@ -127,7 +128,7 @@
     const token = new URLSearchParams(location.search).get('token');
     const headers = { 'content-type': 'application/json', ...(token ? { 'x-token': token } : {}) };
     // The browser fetches these two itself, so the token has to ride in their URLs.
-    if (token) for (const id of ['manifest', 'icon']) $(id).href += '?token=' + encodeURIComponent(token);
+    if (token) for (const id of ['manifest', 'icon', 'history']) $(id).href += '?token=' + encodeURIComponent(token);
 
     function inks() {
       return PALETTES[$('palette').value];

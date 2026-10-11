@@ -28,7 +28,11 @@ const MAX_PROMPT = 4000;
 // A dithered 240x240 PNG is tens of kilobytes; base64 and JSON add a third.
 const MAX_DITHERED_BODY = 512 * 1024;
 // What saveImage names a generation: an ISO timestamp with - for : and . plus six hex digits.
-const SAVED_NAME = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{6}$/;
+const STAMP = String.raw`\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{6}`;
+const SAVED_NAME = new RegExp(`^${STAMP}$`);
+// The only files /api/images hands out: a generation's original or its 240x240 copy.
+const IMAGE_PATH = new RegExp(`^/api/images/(${STAMP}(?:-240)?\\.png)$`);
+const HISTORY_LIMIT = 50;
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 // Image generation is slow; give up before a proxy in front of us does.
 const UPSTREAM_TIMEOUT_MS = 180_000;
@@ -94,6 +98,42 @@ async function saveImage(imagesDir, image, meta) {
     console.error(`could not save image to ${imagesDir}: ${e.message}`);
     return null;
   }
+}
+
+// The newest generations, newest first. The names are timestamps, so sorting
+// them sorts by time. A generation whose .json cannot be read is still listed.
+async function listGenerations(res, { imagesDir }) {
+  let files = [];
+  try {
+    if (imagesDir) files = await fs.promises.readdir(imagesDir);
+  } catch {
+    // No folder yet: nothing has been generated.
+  }
+  const have = new Set(files);
+  const names = files
+    .filter((file) => file.endsWith('.json'))
+    .map((file) => file.slice(0, -'.json'.length))
+    .filter((name) => SAVED_NAME.test(name) && have.has(`${name}.png`))
+    .sort()
+    .reverse()
+    .slice(0, HISTORY_LIMIT);
+  const generations = await Promise.all(names.map(async (name) => {
+    let meta = {};
+    try {
+      meta = JSON.parse(await fs.promises.readFile(path.join(imagesDir, `${name}.json`), 'utf8'));
+    } catch {}
+    return {
+      name,
+      created: meta.created ?? null,
+      subject: meta.subject ?? '',
+      style: meta.style ?? '',
+      prompt: meta.prompt ?? '',
+      model: meta.model ?? '',
+      usage: meta.usage ?? null,
+      dithered: have.has(`${name}-240.png`),
+    };
+  }));
+  return send(res, 200, { generations });
 }
 
 // The page dithers, so it sends the 240x240 result back to sit next to the
@@ -226,6 +266,19 @@ export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', qual
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'GET only' });
+
+    if (url.pathname === '/api/generations') return listGenerations(res, { imagesDir });
+
+    // IMAGE_PATH admits only names saveImage produces, so nothing else in or
+    // outside the folder can be read through here.
+    const image = IMAGE_PATH.exec(url.pathname);
+    if (image) {
+      if (!imagesDir) return send(res, 404, { error: 'not found' });
+      return fs.readFile(path.join(imagesDir, image[1]), (err, data) => {
+        if (err) return send(res, 404, { error: 'not found' });
+        send(res, 200, data, 'image/png');
+      });
+    }
 
     // Resolve first, compare after: a ../ in the URL must not leave public/.
     const wanted = url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname);

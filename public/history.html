@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>History — E-Ink Generator</title>
+  <meta name="theme-color" content="#11151c" />
+  <link rel="icon" id="icon" type="image/png" href="/icon-192.png" />
+  <style>
+    :root { color-scheme: light dark; --bg: #f6f7f9; --fg: #1d2330; --muted: #667085; --card: #fff; --line: #d0d5dd; --accent: #2563eb; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #11151c; --fg: #e6e9ef; --muted: #98a2b3; --card: #1a202a; --line: #344054; --accent: #5b8def; } }
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+    main { max-width: 64rem; margin: 3rem auto; padding: 0 16px; }
+    h1 { margin: 0; }
+    a { color: var(--accent); }
+    .muted { color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 1rem; margin-top: 1.5rem; }
+    .card { background: var(--card); border-radius: 12px; padding: 0.75rem; overflow-wrap: anywhere; }
+    /* 240 real pixels; kept crisp when the card is wider. */
+    .card img { display: block; width: 100%; aspect-ratio: 1; image-rendering: pixelated; border: 1px solid var(--line); border-radius: 6px; background: #fff; box-sizing: border-box; }
+    .card h2 { font-size: 1rem; margin: 0.5rem 0 0; }
+    .card p { margin: 0.15rem 0 0; font-size: 0.875rem; }
+    details { margin-top: 0.35rem; font-size: 0.8125rem; }
+    summary { cursor: pointer; color: var(--muted); }
+    details p { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>History</h1>
+    <p class="muted"><a id="back" href="/">← Generator</a> · <span id="info">loading…</span></p>
+    <div class="grid" id="grid"></div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    // Carry the token through, so API calls, images and links work when the page was opened with ?token=.
+    const token = new URLSearchParams(location.search).get('token');
+    const carry = token ? '?token=' + encodeURIComponent(token) : '';
+    $('back').href += carry;
+    $('icon').href += carry;
+
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    }
+
+    function card(g) {
+      const node = element('div', '', 'card');
+      const original = `/api/images/${g.name}.png${carry}`;
+
+      // The 240x240 copy is what the panel shows; an old generation may only have its original.
+      const link = element('a');
+      link.href = original;
+      link.target = '_blank';
+      link.title = 'Open the 1024x1024 original';
+      const img = element('img');
+      img.loading = 'lazy';
+      img.alt = g.subject || 'generated image';
+      img.src = g.dithered ? `/api/images/${g.name}-240.png${carry}` : original;
+      link.append(img);
+      node.append(link);
+
+      node.append(element('h2', g.subject || '(no subject recorded)'));
+      node.append(element('p', [g.style, g.model].filter(Boolean).join(' · '), 'muted'));
+      const when = g.created ? new Date(g.created).toLocaleString() : '';
+      const tokens = g.usage && typeof g.usage.total_tokens === 'number' ? `${g.usage.total_tokens.toLocaleString()} tokens` : '';
+      node.append(element('p', [when, tokens].filter(Boolean).join(' · '), 'muted'));
+
+      if (g.prompt) {
+        const details = element('details');
+        details.append(element('summary', 'Prompt sent'), element('p', g.prompt));
+        node.append(details);
+      }
+      return node;
+    }
+
+    fetch('/api/generations' + carry)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) throw new Error(d.error);
+        $('info').textContent = d.generations.length ? `last ${d.generations.length} generations, newest first` : 'nothing generated yet';
+        $('grid').append(...d.generations.map(card));
+      })
+      .catch((e) => { $('info').textContent = e.message; });
+  </script>
+</body>
+</html>

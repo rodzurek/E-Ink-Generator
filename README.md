@@ -8,6 +8,7 @@ the install needs no setup commands and nothing to build. It runs as a systemd
 ```
 server.js           static files from public/, /api/health, /api/generate, /api/dithered, optional TOKEN
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
+public/history.html the last 50 generations
 public/icon-*.png   app icons for the Android install
 server.test.mjs     node --test, run with `npm test`
 homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill the dialog
@@ -73,6 +74,13 @@ same timestamped name:
   `model`, `quality`, and `usage`: the token counts OpenAI reported for that
   generation (`total_tokens`, `input_tokens`, `output_tokens`), or `null` if
   the model reported none. The page shows the same counts after generating.
+
+**History** (`/history.html`, linked from the top of the generator) shows the
+last 50 generations, newest first: the 240x240 image, what was typed, the
+style, model, date and tokens, with the full prompt behind **Prompt sent**.
+Clicking an image opens its 1024x1024 original. It reads `images/` through
+`/api/generations` and `/api/images/<name>.png`; images converted from a photo
+or upload are not listed, because those are never stored.
 
 If the folder cannot be written the image is still returned and the reason is
 logged. Nothing is ever deleted, so clear the folder yourself.
