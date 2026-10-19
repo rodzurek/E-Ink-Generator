@@ -39,6 +39,25 @@
     $('back').href += carry;
     $('icon').href += carry;
 
+    // Behind Cloudflare Access an expired session turns API calls into a
+    // redirect to the login page, which fetch must not follow. Reload instead,
+    // so the browser goes through the login and comes back. At most once a
+    // minute, so a login that keeps failing shows an error instead of looping.
+    // The app itself always answers JSON; a 401 or 403 that is not JSON is Access.
+    async function api(url, init) {
+      const res = await fetch(url, { ...init, redirect: 'manual' });
+      const fromAccess = (res.status === 401 || res.status === 403) && !(res.headers.get('content-type') || '').includes('json');
+      if (res.type !== 'opaqueredirect' && !fromAccess) return res;
+      let last = 0;
+      try { last = Number(sessionStorage.getItem('relogin')) || 0; } catch {}
+      if (Date.now() - last > 60_000) {
+        try { sessionStorage.setItem('relogin', String(Date.now())); } catch {}
+        location.reload();
+        return new Promise(() => {});
+      }
+      throw new Error('signed out: reload the page to sign in again');
+    }
+
     function element(tag, text, className) {
       const node = document.createElement(tag);
       if (text) node.textContent = text;
@@ -76,7 +95,7 @@
       return node;
     }
 
-    fetch('/api/generations' + carry)
+    api('/api/generations' + carry)
       .then((r) => r.json())
       .then((d) => {
         if (d.error) throw new Error(d.error);

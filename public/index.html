@@ -130,6 +130,25 @@
     // The browser fetches these two itself, so the token has to ride in their URLs.
     if (token) for (const id of ['manifest', 'icon', 'history']) $(id).href += '?token=' + encodeURIComponent(token);
 
+    // Behind Cloudflare Access an expired session turns API calls into a
+    // redirect to the login page, which fetch must not follow. Reload instead,
+    // so the browser goes through the login and comes back. At most once a
+    // minute, so a login that keeps failing shows an error instead of looping.
+    // The app itself always answers JSON; a 401 or 403 that is not JSON is Access.
+    async function api(url, init) {
+      const res = await fetch(url, { ...init, redirect: 'manual' });
+      const fromAccess = (res.status === 401 || res.status === 403) && !(res.headers.get('content-type') || '').includes('json');
+      if (res.type !== 'opaqueredirect' && !fromAccess) return res;
+      let last = 0;
+      try { last = Number(sessionStorage.getItem('relogin')) || 0; } catch {}
+      if (Date.now() - last > 60_000) {
+        try { sessionStorage.setItem('relogin', String(Date.now())); } catch {}
+        location.reload();
+        return new Promise(() => {});
+      }
+      throw new Error('signed out: reload the page to sign in again');
+    }
+
     function inks() {
       return PALETTES[$('palette').value];
     }
@@ -184,7 +203,7 @@
       if (!savedName) return;
       const name = savedName;
       const image = canvas.toDataURL('image/png').split(',')[1];
-      fetch('/api/dithered', { method: 'POST', headers, body: JSON.stringify({ name, image }) })
+      api('/api/dithered', { method: 'POST', headers, body: JSON.stringify({ name, image }) })
         .then((r) => r.json())
         .then((d) => {
           if (d.error) throw new Error(d.error);
@@ -249,7 +268,7 @@
       $('go').disabled = true;
       $('status').textContent = 'generating… this can take a minute';
       try {
-        const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed, style, model: $('model').value || undefined }) });
+        const res = await api('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed, style, model: $('model').value || undefined }) });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const img = await load('data:image/png;base64,' + data.image);
@@ -287,7 +306,7 @@
     $('palette').addEventListener('change', render);
     $('dither').addEventListener('change', render);
 
-    fetch('/api/info', { headers })
+    api('/api/info', { headers })
       .then((r) => r.json())
       .then((d) => {
         if (d.error) throw new Error(d.error);
