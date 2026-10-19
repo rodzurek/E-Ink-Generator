@@ -254,8 +254,8 @@ test('access: a known user is let in and sees who they and their partner are', a
 
 test('access: a known device reaches /api/device/ and nothing else', async () => {
   await withAccess({}, async (base) => {
-    // No device endpoints exist yet, so getting past the check means a 404.
-    assert.equal((await fetch(`${base}/api/device/frame`, { headers: asDevice() })).status, 404);
+    // Past the check with nothing sent to it yet: nothing new.
+    assert.equal((await fetch(`${base}/api/device/frame`, { headers: asDevice() })).status, 204);
     assert.equal((await fetch(`${base}/`, { headers: asDevice() })).status, 403);
     assert.equal((await fetch(`${base}/api/info`, { headers: asDevice() })).status, 403);
     assert.equal((await fetch(`${base}/api/device/frame`, { headers: asUser() })).status, 403);
@@ -353,7 +353,7 @@ test('access: unreachable signing keys mean 503, not a way in', async () => {
 test('local stand-ins act as a user on the website and as a device on /api/device/', async () => {
   await withServer({ config: accessConfig, devUser: 'ampy@example.com', devDevice: 'rod-display' }, async (base) => {
     assert.deepEqual((await (await fetch(`${base}/api/info`)).json()).user, { email: 'ampy@example.com', name: 'Ampy' });
-    assert.equal((await fetch(`${base}/api/device/frame`)).status, 404);
+    assert.equal((await fetch(`${base}/api/device/frame`)).status, 204);
   });
   await withServer({}, async (base) => {
     assert.equal((await fetch(`${base}/api/device/frame`)).status, 403);
@@ -481,4 +481,96 @@ test('send: needs a user with a partner who has a display', async () => {
   await withSendServer({ config: noDisplay, devUser: 'a@x' }, async (base) => {
     assert.equal((await sendImage(base, body)).status, 409);
   });
+});
+
+// Device endpoints: Rod (the stand-in user) sends, Ampy's display (the
+// stand-in device) fetches and acknowledges.
+const asAmpyDisplay = { devUser: 'rod@example.com', devDevice: 'ampy-display' };
+const ack = (base, frame) => fetch(`${base}/api/device/ack?frame=${encodeURIComponent(frame)}`, { method: 'POST' });
+
+test('device: nothing sent yet, or nothing newer, is 204', async () => {
+  await withSendServer(asAmpyDisplay, async (base) => {
+    const empty = await fetch(`${base}/api/device/frame`);
+    assert.equal(empty.status, 204);
+    assert.equal((await empty.arrayBuffer()).byteLength, 0);
+
+    const { sent } = await (await sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') })).json();
+    assert.equal((await fetch(`${base}/api/device/frame?after=${sent}`)).status, 204);
+  });
+});
+
+test('device: a new frame comes back raw with its id', async () => {
+  await withSendServer(asAmpyDisplay, async (base) => {
+    const { sent } = await (await sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') })).json();
+    for (const query of ['', '?after=', '?after=2000-01-01T00-00-00-000Z-abcdef']) {
+      const res = await fetch(`${base}/api/device/frame${query}`);
+      assert.equal(res.status, 200, query);
+      assert.equal(res.headers.get('content-type'), 'application/octet-stream');
+      assert.equal(res.headers.get('content-length'), '28800');
+      assert.equal(res.headers.get('x-frame-id'), sent);
+      assert.deepEqual(Buffer.from(await res.arrayBuffer()), whiteFrame);
+    }
+    assert.equal((await fetch(`${base}/api/device/frame`, { method: 'POST' })).status, 405);
+  });
+});
+
+test('device: the acknowledge records when the current frame was delivered', async () => {
+  await withSendServer(asAmpyDisplay, async (base, { inboxDir }) => {
+    assert.equal((await ack(base, 'anything')).status, 404);
+
+    const send = () => sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') });
+    const first = (await (await send()).json()).sent;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = (await (await send()).json()).sent;
+
+    // Superseded while it was drawing: the newer frame stays undelivered.
+    assert.equal((await ack(base, first)).status, 409);
+    const res = await ack(base, second);
+    assert.equal(res.status, 200);
+    const { deliveredAt } = await res.json();
+    const inbox = JSON.parse(await fs.readFile(path.join(inboxDir, 'ampy-display.json'), 'utf8'));
+    assert.equal(inbox.frame, second);
+    assert.equal(inbox.deliveredAt, deliveredAt);
+
+    // Acknowledging again keeps the first time.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal((await (await ack(base, second)).json()).deliveredAt, deliveredAt);
+    assert.equal((await fetch(`${base}/api/device/ack?frame=${second}`)).status, 405);
+  });
+});
+
+test('device: a send and an acknowledge at the same moment do not lose the new frame', async () => {
+  await withSendServer(asAmpyDisplay, async (base, { inboxDir }) => {
+    const send = () => sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') });
+    const first = (await (await send()).json()).sent;
+    const [, newer] = await Promise.all([ack(base, first), send().then((r) => r.json())]);
+    const inbox = JSON.parse(await fs.readFile(path.join(inboxDir, 'ampy-display.json'), 'utf8'));
+    assert.equal(inbox.frame, newer.sent);
+    assert.equal(inbox.deliveredAt, null);
+  });
+});
+
+test('device: only a known display, and only its own inbox', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
+  const imagesDir = path.join(dir, 'images');
+  const inboxDir = path.join(dir, 'inbox');
+  try {
+    await withAccess({ imagesDir, inboxDir, config: sendConfig }, async (base) => {
+      const rod = { 'cf-access-jwt-assertion': accessToken({ email: 'rod@example.com' }), 'content-type': 'application/json' };
+      const display = (clientId) => ({ 'cf-access-jwt-assertion': accessToken({ common_name: clientId, email: '' }) });
+      const body = JSON.stringify({ image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') });
+      const { sent } = await (await fetch(`${base}/api/send`, { method: 'POST', headers: rod, body })).json();
+
+      assert.equal((await fetch(`${base}/api/device/frame`, { headers: display('ampy.access') })).status, 200);
+      // Rod's own display has nothing: what Rod sends goes to Ampy's.
+      assert.equal((await fetch(`${base}/api/device/frame`, { headers: display('rod.access') })).status, 204);
+      assert.equal((await fetch(`${base}/api/device/ack?frame=${sent}`, { method: 'POST', headers: display('rod.access') })).status, 404);
+      assert.equal((await fetch(`${base}/api/device/frame`, { headers: display('other.access') })).status, 403);
+      assert.equal((await fetch(`${base}/api/device/frame`, { headers: rod })).status, 403);
+      assert.equal((await fetch(`${base}/api/device/ack?frame=${sent}`, { method: 'POST', headers: rod })).status, 403);
+      assert.equal((await fetch(`${base}/api/device/frame`)).status, 401);
+    });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });

@@ -96,6 +96,27 @@ function newStamp() {
   return `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
 }
 
+// Runs fn after every earlier fn for the same key, so a send and an
+// acknowledge for one inbox cannot overwrite each other's change.
+const locks = new Map();
+function withLock(key, fn) {
+  const run = (locks.get(key) || Promise.resolve()).then(fn, fn);
+  const settled = run.catch(() => {});
+  locks.set(key, settled);
+  settled.then(() => { if (locks.get(key) === settled) locks.delete(key); });
+  return run;
+}
+
+// A device's inbox entry, or null when nothing was ever sent to it.
+async function readInbox(file) {
+  try {
+    return JSON.parse(await fs.promises.readFile(file, 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
 // Written beside and then renamed over, so a display reading the file never
 // sees half of it.
 async function writeAtomic(file, data) {
@@ -249,13 +270,58 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
     await fs.promises.writeFile(path.join(imagesDir, `${name}.bin`), frame);
     await fs.promises.mkdir(inboxDir, { recursive: true });
     for (const device of devices) {
-      await writeAtomic(path.join(inboxDir, `${device.id}.json`), JSON.stringify(entry, null, 2) + '\n');
+      const file = path.join(inboxDir, `${device.id}.json`);
+      await withLock(file, () => writeAtomic(file, JSON.stringify(entry, null, 2) + '\n'));
     }
   } catch (e) {
     console.error(`could not send ${name}: ${e.message}`);
     return send(res, 500, { error: 'could not store the frame' });
   }
   return send(res, 200, { sent: name, to: partner.name, devices: devices.map((d) => d.id) });
+}
+
+// The display's current frame, unless it already has it (?after=<frame id>)
+// or nothing was sent to it: then 204. A device reads only its own inbox.
+async function deviceFrame(res, url, { imagesDir, inboxDir, device }) {
+  const entry = inboxDir ? await readInbox(path.join(inboxDir, `${device.id}.json`)) : null;
+  if (!entry || entry.frame === url.searchParams.get('after')) {
+    res.writeHead(204, { 'cache-control': 'no-store' });
+    return res.end();
+  }
+  // The name ends up in a path, so it must be one newStamp made.
+  if (!SAVED_NAME.test(String(entry.frame))) return send(res, 500, { error: 'inbox is damaged' });
+  let frame;
+  try {
+    frame = await fs.promises.readFile(path.join(imagesDir, `${entry.frame}.bin`));
+  } catch (e) {
+    console.error(`frame ${entry.frame} for ${device.id} is missing: ${e.message}`);
+    return send(res, 404, { error: 'the current frame is missing' });
+  }
+  res.writeHead(200, {
+    'content-type': 'application/octet-stream',
+    'content-length': frame.length,
+    'x-frame-id': entry.frame,
+    'cache-control': 'no-store',
+  });
+  return res.end(frame);
+}
+
+// The display drew ?frame=<id>: record when, so the sender can see it arrived.
+// Only the current frame can be acknowledged, and the first time is kept.
+async function deviceAck(res, url, { inboxDir, device }) {
+  const id = url.searchParams.get('frame') || '';
+  if (!inboxDir) return send(res, 404, { error: 'nothing was sent to this display' });
+  const file = path.join(inboxDir, `${device.id}.json`);
+  return withLock(file, async () => {
+    const entry = await readInbox(file);
+    if (!entry) return send(res, 404, { error: 'nothing was sent to this display' });
+    if (entry.frame !== id) return send(res, 409, { error: 'that is not the current frame', current: entry.frame });
+    if (!entry.deliveredAt) {
+      entry.deliveredAt = new Date().toISOString();
+      await writeAtomic(file, JSON.stringify(entry, null, 2) + '\n');
+    }
+    return send(res, 200, { frame: entry.frame, deliveredAt: entry.deliveredAt });
+  });
 }
 
 async function generate(req, res, { apiKey, models, model: defaultModel, quality, imagesDir, fetchImpl, user }) {
@@ -364,6 +430,15 @@ export function createApp({
     // login only the website.
     if (deviceRoute) {
       if (identity?.kind !== 'device') return send(res, 403, { error: 'only a display can use /api/device/' });
+      const { device } = identity;
+      if (url.pathname === '/api/device/frame') {
+        if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
+        return deviceFrame(res, url, { imagesDir, inboxDir, device });
+      }
+      if (url.pathname === '/api/device/ack') {
+        if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+        return deviceAck(res, url, { inboxDir, device });
+      }
       return send(res, 404, { error: 'not found' });
     }
     if (identity && identity.kind !== 'user') return send(res, 403, { error: 'a display cannot use the website' });
