@@ -5,7 +5,7 @@
   "repo": "https://github.com/YOU/e-ink-generator.git",
   "setup": [],
   "exec": "node server.js",
-  "env": "APP_NAME=e-ink-generator\nOPENAI_API_KEY=sk-change-me\n# OPENAI_IMAGE_MODEL=gpt-image-1\n# OPENAI_IMAGE_QUALITY=low\n# TOKEN=change-me",
+  "env": "APP_NAME=e-ink-generator\nOPENAI_API_KEY=sk-change-me\n# OPENAI_IMAGE_MODEL=gpt-image-1\n# OPENAI_IMAGE_QUALITY=low\nACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com\nACCESS_AUD=change-me\n# HOST=127.0.0.1",
   "port": 8090,
   "health": "/api/health"
 }

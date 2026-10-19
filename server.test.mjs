@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { createApp } from './server.js';
+import { parseConfig } from './access.js';
 
 async function withServer(options, fn) {
   const server = createApp(options);
@@ -200,4 +202,170 @@ test('paths cannot climb out of public/', async () => {
   await withServer({}, async (base) => {
     assert.equal((await fetch(`${base}/..%2fserver.js`)).status, 404);
   });
+});
+
+// Cloudflare Access: a key pair stands in for the team's signing key, and
+// fetchImpl serves its public half where the app looks for the certs.
+const TEAM = 'team.cloudflareaccess.com';
+const AUD = 'aud-tag';
+const signer = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+const stranger = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+const accessConfig = parseConfig({
+  users: [
+    { email: 'rod@example.com', name: 'Rod', partner: 'ampy@example.com' },
+    { email: 'ampy@example.com', name: 'Ampy', partner: 'rod@example.com' },
+  ],
+  devices: [{ id: 'rod-display', clientId: 'rod.access', owner: 'rod@example.com' }],
+});
+
+function accessFetch(upstream) {
+  return async (url, init) => {
+    if (url === `https://${TEAM}/cdn-cgi/access/certs`) {
+      const jwk = { ...signer.publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256' };
+      return new Response(JSON.stringify({ keys: [jwk] }), { status: 200 });
+    }
+    return upstream(url, init);
+  };
+}
+
+function accessToken(claims, { key = signer.privateKey, kid = 'k1' } = {}) {
+  const part = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const body = `${part({ alg: 'RS256', kid })}.${part({ aud: [AUD], iss: `https://${TEAM}`, iat: now, exp: now + 600, ...claims })}`;
+  return `${body}.${crypto.sign('RSA-SHA256', Buffer.from(body), key).toString('base64url')}`;
+}
+
+const asUser = (email = 'rod@example.com', extra) => ({ 'cf-access-jwt-assertion': accessToken({ email, ...extra }) });
+const asDevice = (clientId = 'rod.access') => ({ 'cf-access-jwt-assertion': accessToken({ common_name: clientId, email: '' }) });
+
+function withAccess(options, fn) {
+  const upstream = options.fetchImpl || (async () => new Response('{}', { status: 500 }));
+  return withServer({ access: { teamDomain: TEAM, audience: AUD }, config: accessConfig, ...options, fetchImpl: accessFetch(upstream) }, fn);
+}
+
+test('access: a known user is let in and sees who they and their partner are', async () => {
+  await withAccess({}, async (base) => {
+    assert.equal((await fetch(`${base}/`, { headers: asUser() })).status, 200);
+    const info = await (await fetch(`${base}/api/info`, { headers: asUser('ROD@example.com') })).json();
+    assert.deepEqual(info.user, { email: 'rod@example.com', name: 'Rod' });
+    assert.deepEqual(info.partner, { email: 'ampy@example.com', name: 'Ampy' });
+  });
+});
+
+test('access: a known device reaches /api/device/ and nothing else', async () => {
+  await withAccess({}, async (base) => {
+    // No device endpoints exist yet, so getting past the check means a 404.
+    assert.equal((await fetch(`${base}/api/device/frame`, { headers: asDevice() })).status, 404);
+    assert.equal((await fetch(`${base}/`, { headers: asDevice() })).status, 403);
+    assert.equal((await fetch(`${base}/api/info`, { headers: asDevice() })).status, 403);
+    assert.equal((await fetch(`${base}/api/device/frame`, { headers: asUser() })).status, 403);
+  });
+});
+
+test('access: unknown people and devices are refused', async () => {
+  await withAccess({}, async (base) => {
+    assert.equal((await fetch(`${base}/`, { headers: asUser('someone@example.com') })).status, 403);
+    assert.equal((await fetch(`${base}/api/device/frame`, { headers: asDevice('other.access') })).status, 403);
+    assert.equal((await fetch(`${base}/`, { headers: { 'cf-access-jwt-assertion': accessToken({}) } })).status, 403);
+  });
+});
+
+test('access: bad, expired, foreign and missing tokens are refused', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const b64 = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const [h, p, sig] = accessToken({ email: 'ampy@example.com' }).split('.');
+  const altered = [h, b64({ ...JSON.parse(Buffer.from(p, 'base64url')), email: 'rod@example.com' }), sig].join('.');
+  const unsigned = [b64({ alg: 'none' }), b64({ email: 'rod@example.com', aud: [AUD], iss: `https://${TEAM}`, exp: now + 600 }), ''].join('.');
+  const refused = {
+    'no token': {},
+    'not a token': { 'cf-access-jwt-assertion': 'nonsense' },
+    'bad signature': { 'cf-access-jwt-assertion': accessToken({ email: 'rod@example.com' }, { key: stranger.privateKey }) },
+    'unknown key': { 'cf-access-jwt-assertion': accessToken({ email: 'rod@example.com' }, { kid: 'k2' }) },
+    'altered claims': { 'cf-access-jwt-assertion': altered },
+    'alg none': { 'cf-access-jwt-assertion': unsigned },
+    'expired': asUser('rod@example.com', { exp: now - 3600 }),
+    'wrong audience': asUser('rod@example.com', { aud: ['other-app'] }),
+    'wrong team': asUser('rod@example.com', { iss: 'https://other.cloudflareaccess.com' }),
+  };
+  await withAccess({}, async (base) => {
+    for (const [why, headers] of Object.entries(refused)) {
+      assert.equal((await fetch(`${base}/`, { headers })).status, 401, why);
+    }
+  });
+});
+
+test('access: health still answers with no credentials, and TOKEN is not needed', async () => {
+  await withAccess({ token: 'secret' }, async (base) => {
+    const res = await fetch(`${base}/api/health`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(Object.keys(await res.json()).sort(), ['ok', 'uptime']);
+    assert.equal((await fetch(`${base}/`, { headers: asUser() })).status, 200);
+    const manifest = await (await fetch(`${base}/manifest.webmanifest`, { headers: asUser() })).json();
+    assert.equal(manifest.start_url, '/');
+  });
+});
+
+test('access: a new generation records who made it', async () => {
+  const imagesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
+  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  try {
+    await withAccess({ apiKey: 'sk-test', imagesDir, fetchImpl }, async (base) => {
+      const res = await fetch(`${base}/api/generate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...asUser('ampy@example.com') },
+        body: JSON.stringify({ prompt: 'a fox' }),
+      });
+      const { saved } = await res.json();
+      const meta = JSON.parse(await fs.readFile(path.join(imagesDir, `${saved}.json`), 'utf8'));
+      assert.equal(meta.createdBy, 'ampy@example.com');
+    });
+  } finally {
+    await fs.rm(imagesDir, { recursive: true, force: true });
+  }
+});
+
+test('access: the signing keys are fetched once, not per request', async () => {
+  let fetched = 0;
+  const serve = accessFetch(async () => new Response('{}', { status: 500 }));
+  const fetchImpl = async (url, init) => {
+    if (url.includes('/cdn-cgi/access/certs')) fetched += 1;
+    return serve(url, init);
+  };
+  await withServer({ access: { teamDomain: `https://${TEAM}/`, audience: AUD }, config: accessConfig, fetchImpl }, async (base) => {
+    for (let i = 0; i < 3; i += 1) assert.equal((await fetch(`${base}/`, { headers: asUser() })).status, 200);
+    assert.equal(fetched, 1);
+  });
+});
+
+test('access: unreachable signing keys mean 503, not a way in', async () => {
+  const fetchImpl = async () => new Response('down', { status: 502 });
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    await withServer({ access: { teamDomain: TEAM, audience: AUD }, config: accessConfig, fetchImpl }, async (base) => {
+      assert.equal((await fetch(`${base}/`, { headers: asUser() })).status, 503);
+    });
+  } finally {
+    console.error = quiet;
+  }
+});
+
+test('local stand-ins act as a user on the website and as a device on /api/device/', async () => {
+  await withServer({ config: accessConfig, devUser: 'ampy@example.com', devDevice: 'rod-display' }, async (base) => {
+    assert.deepEqual((await (await fetch(`${base}/api/info`)).json()).user, { email: 'ampy@example.com', name: 'Ampy' });
+    assert.equal((await fetch(`${base}/api/device/frame`)).status, 404);
+  });
+  await withServer({}, async (base) => {
+    assert.equal((await fetch(`${base}/api/device/frame`)).status, 403);
+    assert.equal((await (await fetch(`${base}/api/info`)).json()).user, null);
+  });
+  assert.throws(() => createApp({ config: accessConfig, devUser: 'nobody@example.com' }), /DEV_USER/);
+});
+
+test('config.json mistakes stop the server instead of locking someone out', () => {
+  assert.throws(() => parseConfig({ users: [{ email: 'a@x', partner: 'b@x' }] }), /partner/);
+  assert.throws(() => parseConfig({ users: [{ email: 'a@x' }, { email: 'A@x' }] }), /twice/);
+  assert.throws(() => parseConfig({ users: [{ email: 'a@x' }], devices: [{ id: 'd', clientId: 'c', owner: 'b@x' }] }), /owner/);
+  assert.throws(() => parseConfig({ users: [{ email: 'a@x' }], devices: [{ id: '../d', clientId: 'c', owner: 'a@x' }] }), /device id/);
+  assert.throws(() => parseConfig({ users: [{ email: 'a@x' }], devices: [{ id: 'd', owner: 'a@x' }] }), /clientId/);
 });

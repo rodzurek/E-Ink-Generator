@@ -1,0 +1,10 @@
+{
+  "users": [
+    { "email": "partner-one@example.com", "name": "One", "partner": "partner-two@example.com" },
+    { "email": "partner-two@example.com", "name": "Two", "partner": "partner-one@example.com" }
+  ],
+  "devices": [
+    { "id": "one-display", "clientId": "0123456789abcdef0123456789abcdef.access", "owner": "partner-one@example.com" },
+    { "id": "two-display", "clientId": "fedcba9876543210fedcba9876543210.access", "owner": "partner-two@example.com" }
+  ]
+}

@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { AccessUnavailable, createVerifier, identify, loadConfig, parseConfig } from './access.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, 'public');
@@ -167,7 +168,7 @@ async function saveDithered(req, res, { imagesDir }) {
   }
 }
 
-async function generate(req, res, { apiKey, models, model: defaultModel, quality, imagesDir, fetchImpl }) {
+async function generate(req, res, { apiKey, models, model: defaultModel, quality, imagesDir, fetchImpl, user }) {
   if (!apiKey) return send(res, 503, { error: 'OPENAI_API_KEY is not set on the server' });
 
   let body;
@@ -201,28 +202,85 @@ async function generate(req, res, { apiKey, models, model: defaultModel, quality
     // Token counts as OpenAI reports them; null from a model that reports none.
     const usage = data.usage && typeof data.usage === 'object' ? data.usage : null;
     const style = typeof body.style === 'string' ? body.style.trim().slice(0, 100) : '';
-    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), subject, style, prompt, model, quality, usage });
+    const createdBy = user?.email ?? null;
+    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), createdBy, subject, style, prompt, model, quality, usage });
     return send(res, 200, { image, saved, usage });
   } catch (e) {
     return send(res, 502, { error: e.name === 'TimeoutError' ? 'OpenAI took too long to answer' : e.message });
   }
 }
 
-export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', imagesDir = '', fetchImpl = fetch } = {}) {
+// Who is calling, as { kind: 'user', user } or { kind: 'device', device }, or
+// null when nobody is known (no Access and no stand-in: the open local setup).
+// Answers the request itself and returns undefined when the caller is refused.
+async function whoIs(req, res, { verify, config, standIn }) {
+  if (!verify) return standIn;
+  const jwt = req.headers['cf-access-jwt-assertion'];
+  if (!jwt) return void send(res, 401, { error: 'no Cloudflare Access token: open the app through its public address' });
+  let claims;
+  try {
+    claims = await verify(String(jwt));
+  } catch (e) {
+    if (e instanceof AccessUnavailable) return void send(res, 503, { error: e.message });
+    return void send(res, 401, { error: `Cloudflare Access token refused: ${e.message}` });
+  }
+  const identity = identify(claims, config);
+  if (!identity) return void send(res, 403, { error: 'not a known user or device' });
+  return identity;
+}
+
+// access: { teamDomain, audience } turns on Cloudflare Access; config is what
+// parseConfig returns. devUser / devDevice stand in for a signed-in user and a
+// device when Access is off, for local runs.
+export function createApp({
+  token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', imagesDir = '', fetchImpl = fetch,
+  access = null, config = parseConfig(), devUser = '', devDevice = '',
+} = {}) {
   // OPENAI_IMAGE_MODEL may name a model that is not in the list; offer it too.
   const models = MODELS.includes(model) ? MODELS : [model, ...MODELS];
+  const verify = access ? createVerifier({ ...access, fetchImpl }) : null;
+  // Access replaces TOKEN, and nothing stands in for a real identity behind it.
+  if (access) token = devUser = devDevice = '';
+
+  const standInUser = devUser ? config.users.get(devUser.trim().toLowerCase()) : null;
+  if (devUser && !standInUser) throw new Error(`DEV_USER ${devUser} is not a user in config.json`);
+  const standInDevice = devDevice ? [...config.devices.values()].find((d) => d.id === devDevice) : null;
+  if (devDevice && !standInDevice) throw new Error(`DEV_DEVICE ${devDevice} is not a device id in config.json`);
 
   return http.createServer((req, res) => {
+    route(req, res).catch((e) => {
+      console.error(e);
+      if (!res.headersSent) send(res, 500, { error: 'internal error' });
+    });
+  });
+
+  async function route(req, res) {
     const url = new URL(req.url, 'http://localhost');
 
-    // The dashboard probes this from the node itself. It stays outside the
-    // token check, so it must never say more than "alive, for this long".
+    // The dashboard probes this from the node itself. It stays outside every
+    // check, so it must never say more than "alive, for this long".
     if (url.pathname === '/api/health') {
       return send(res, 200, { ok: true, uptime: Math.round((Date.now() - started) / 1000) });
     }
 
-    // Optional: set TOKEN in the install dialog's environment box and the
-    // dashboard's Link button can carry it as ?token=.
+    const deviceRoute = url.pathname.startsWith('/api/device/');
+    const standIn = deviceRoute
+      ? standInDevice && { kind: 'device', device: standInDevice }
+      : standInUser && { kind: 'user', user: standInUser };
+    const identity = await whoIs(req, res, { verify, config, standIn: standIn || null });
+    if (identity === undefined) return;
+
+    // A display's service token opens only /api/device/*, and a partner's
+    // login only the website.
+    if (deviceRoute) {
+      if (identity?.kind !== 'device') return send(res, 403, { error: 'only a display can use /api/device/' });
+      return send(res, 404, { error: 'not found' });
+    }
+    if (identity && identity.kind !== 'user') return send(res, 403, { error: 'a display cannot use the website' });
+    const user = identity?.user ?? null;
+
+    // Optional when Access is off: set TOKEN in the install dialog's
+    // environment box and the dashboard's Link button can carry it as ?token=.
     if (token) {
       const given = url.searchParams.get('token') || req.headers['x-token'] || '';
       if (!given || !tokenMatches(given, token)) {
@@ -231,7 +289,12 @@ export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', qual
     }
 
     if (url.pathname === '/api/info') {
-      return send(res, 200, { name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, models, ready: Boolean(apiKey) });
+      const partner = user?.partner ? config.users.get(user.partner) : null;
+      const person = (u) => (u ? { email: u.email, name: u.name } : null);
+      return send(res, 200, {
+        name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, models, ready: Boolean(apiKey),
+        user: person(user), partner: person(partner),
+      });
     }
 
     // Built here, not a file in public/: Android fetches the icons and opens
@@ -257,7 +320,7 @@ export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', qual
 
     if (url.pathname === '/api/generate') {
       if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
-      return generate(req, res, { apiKey, models, model, quality, imagesDir, fetchImpl });
+      return generate(req, res, { apiKey, models, model, quality, imagesDir, fetchImpl, user });
     }
 
     if (url.pathname === '/api/dithered') {
@@ -289,7 +352,7 @@ export function createApp({ token = '', apiKey = '', model = 'gpt-image-1', qual
       if (err) return send(res, 404, { error: 'not found' });
       send(res, 200, data, TYPES[path.extname(file)] || 'application/octet-stream');
     });
-  });
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -300,14 +363,39 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.loadEnvFile?.(path.join(HERE, '.env'));
   } catch {}
   const port = Number(process.env.PORT || 8090);
+  // 127.0.0.1 when cloudflared runs on this node, so the app is reachable only through the tunnel.
   const host = process.env.HOST || '0.0.0.0';
-  const server = createApp({
-    token: process.env.TOKEN || '',
-    apiKey: process.env.OPENAI_API_KEY || '',
-    model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
-    quality: process.env.OPENAI_IMAGE_QUALITY || 'low',
-    imagesDir: path.resolve(HERE, process.env.IMAGES_DIR || 'images'),
-  });
+  const teamDomain = process.env.ACCESS_TEAM_DOMAIN || '';
+  const audience = process.env.ACCESS_AUD || '';
+  if (Boolean(teamDomain) !== Boolean(audience)) {
+    console.error('set both ACCESS_TEAM_DOMAIN and ACCESS_AUD, or neither');
+    process.exit(1);
+  }
+  const devUser = process.env.DEV_USER || '';
+  const devDevice = process.env.DEV_DEVICE || '';
+  // config.json is needed once there are people or devices to recognise.
+  const configFile = path.resolve(HERE, process.env.CONFIG_FILE || 'config.json');
+  let server;
+  try {
+    const needed = teamDomain || devUser || devDevice;
+    const config = needed || fs.existsSync(configFile) ? loadConfig(configFile) : parseConfig();
+    if (teamDomain && (devUser || devDevice)) console.error('DEV_USER and DEV_DEVICE are ignored while Access is configured');
+    if (teamDomain && process.env.TOKEN) console.error('TOKEN is ignored while Access is configured');
+    server = createApp({
+      token: process.env.TOKEN || '',
+      apiKey: process.env.OPENAI_API_KEY || '',
+      model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
+      quality: process.env.OPENAI_IMAGE_QUALITY || 'low',
+      imagesDir: path.resolve(HERE, process.env.IMAGES_DIR || 'images'),
+      access: teamDomain ? { teamDomain, audience } : null,
+      config,
+      devUser,
+      devDevice,
+    });
+  } catch (e) {
+    console.error(e.code === 'ENOENT' ? `${configFile} is missing — copy config.example.json and fill it in` : e.message);
+    process.exit(1);
+  }
   server.on('error', (e) => {
     console.error(e.code === 'EADDRINUSE' ? `port ${port} is already taken — set PORT to a free one` : e.message);
     process.exit(1);
