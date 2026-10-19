@@ -6,7 +6,9 @@ the install needs no setup commands and nothing to build. It runs as a systemd
 **user** unit the agent writes for you, which needs no root and no sudoers line.
 
 ```
-server.js           static files from public/, /api/health, /api/generate, /api/dithered, optional TOKEN
+server.js           static files from public/, /api/health, /api/generate, /api/dithered, who is calling
+access.js           Cloudflare Access token check, config.json users and devices
+config.example.json users, partners and devices; copy to config.json (git-ignored)
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
 public/history.html the last 50 generations
 public/icon-*.png   app icons for the Android install
@@ -43,9 +45,10 @@ Open the site in Chrome on the phone, then menu → **Add to Home screen** →
 
 Chrome only offers **Install** over `https` (or on `localhost`), so this needs
 the public address; over plain `http` on the LAN it only offers a shortcut.
-With `TOKEN` set, open the page with `?token=` before installing: the token is
-written into the installed app's start address, so changing `TOKEN` later means
-installing again. There is no service worker, so the app needs the server to be
+Behind Cloudflare Access the installed app signs in like the browser does.
+Without Access but with `TOKEN` set, open the page with `?token=` before
+installing: the token is written into the installed app's start address, so
+changing `TOKEN` later means installing again. There is no service worker, so the app needs the server to be
 reachable and never shows a stale page.
 
 ## Converting your own image
@@ -69,7 +72,8 @@ same timestamped name:
   gives. The page sends it back through `/api/dithered` after rendering, and
   again when the palette or dither setting changes, so it always holds the
   last render and earlier ones are overwritten.
-- `.json` — `created`, `subject` (what was typed), `style` (the style
+- `.json` — `created`, `createdBy` (the email of the partner who generated
+  it, or `null` without Access or a stand-in user), `subject` (what was typed), `style` (the style
   picked), `prompt` (what was sent),
   `model`, `quality`, and `usage`: the token counts OpenAI reported for that
   generation (`total_tokens`, `input_tokens`, `output_tokens`), or `null` if
@@ -93,11 +97,17 @@ logged. Nothing is ever deleted, so clear the folder yourself.
 | `OPENAI_IMAGE_MODEL`   | `gpt-image-1` | the model the page starts on; the picklist is `MODELS` in `server.js` |
 | `OPENAI_IMAGE_QUALITY` | `low`         | `low`, `medium` or `high`; low is plenty at 240px |
 | `IMAGES_DIR`           | `images`      | where generations are stored; relative to the app folder |
-| `TOKEN`                | —             | see **Token** below                            |
+| `ACCESS_TEAM_DOMAIN`   | —             | e.g. `your-team.cloudflareaccess.com`; see **Cloudflare Access** |
+| `ACCESS_AUD`           | —             | the Access application's audience (AUD) tag    |
+| `CONFIG_FILE`          | `config.json` | users, partners and devices; relative to the app folder |
+| `DEV_USER`             | —             | without Access: act as this user (an email in `config.json`) |
+| `DEV_DEVICE`           | —             | without Access: act as this device (an `id` in `config.json`) on `/api/device/*` |
+| `TOKEN`                | —             | without Access only; see **Token** below       |
 | `PORT`                 | `8090`        |                                                |
+| `HOST`                 | `0.0.0.0`     | `127.0.0.1` when cloudflared runs on the same node, so the app is reachable only through the tunnel |
 
-Each generation is billed to the key. Set `TOKEN` if the app is reachable by
-anyone you would not hand the key to.
+Each generation is billed to the key. Put the app behind Cloudflare Access (or
+at least set `TOKEN`) if it is reachable by anyone you would not hand the key to.
 
 ## Run it locally
 
@@ -124,7 +134,7 @@ In **Install app**, pick kind **git** and fill:
 | Repo           | `https://github.com/you/e-ink-generator.git` |
 | Setup          | leave empty — there are no dependencies |
 | Start command  | `node server.js`                        |
-| Environment    | `OPENAI_API_KEY=…`, and `TOKEN=…` if you want one |
+| Environment    | `OPENAI_API_KEY=…`, `ACCESS_TEAM_DOMAIN=…`, `ACCESS_AUD=…` |
 | Port           | `8090`                                  |
 | Health         | `/api/health`                           |
 
@@ -157,9 +167,53 @@ the dialog's template list. Or fill the form once and press **Save as template**
   script breaks on the Pi. The exec bit does not survive a push from Windows —
   call scripts as `bash script.sh`.
 
+## Cloudflare Access
+
+The public address is published through a Cloudflare Tunnel with Cloudflare
+Zero Trust (Access) in front, so the app has no login of its own. Every request
+Access lets through carries a signed token in the `Cf-Access-Jwt-Assertion`
+header. With `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` set, the app checks that
+token on every request except `/api/health`: the RS256 signature against the
+team's keys at `https://<team>/cdn-cgi/access/certs` (fetched once and kept
+for an hour), the audience tag, the issuer and the expiry. Then it looks the
+caller up in `config.json`:
+
+- **A partner** signs in with their email; the token carries it. The email must
+  be a user in `config.json`.
+- **A display** uses its own Access service token, sending
+  `CF-Access-Client-Id` and `CF-Access-Client-Secret`. Cloudflare checks them
+  and forwards a token with no email and the token's Client ID as
+  `common_name`, which must be a device's `clientId` in `config.json`.
+
+Anything else is refused: no token 401, a bad, expired or foreign token 401,
+a valid token for someone not in `config.json` 403. A display can use only
+`/api/device/*` and a partner only the rest. If the signing keys cannot be
+fetched the app answers 503 rather than letting anyone in.
+
+`config.json` is git-ignored, so copy it to the node by hand next to
+`server.js`. Each user has an `email`, a `name` and their `partner`'s email;
+each device has an `id` (lowercase letters, digits and `-`), the `clientId` of
+its service token and its `owner`'s email. The Client ID is an identifier, not
+a secret; the Client Secret lives only on the device and is never written into
+the app. A mistake in the file stops the server at start-up with the reason.
+
+While Access is configured, `TOKEN`, `DEV_USER` and `DEV_DEVICE` are ignored.
+Never run with Access off on an address the internet can reach: the headers
+are then not checked at all. Set `HOST=127.0.0.1` when cloudflared runs on the
+same node, so the app cannot be reached past the tunnel.
+
+When an Access session expires, Cloudflare answers the page's API calls with a
+redirect to its login. The pages notice and reload, which takes the browser
+through the login and back.
+
+**Local runs** have no Cloudflare in front. Leave the two `ACCESS_` variables
+unset and set `DEV_USER` to a user's email to act as that partner on the
+website, and `DEV_DEVICE` to a device id to act as that display on
+`/api/device/*`. Without them the website is open and nobody is recorded.
+
 ## Token
 
-With `TOKEN` set, every path except `/api/health` wants `?token=` or an
+Only without Cloudflare Access. With `TOKEN` set, every path except `/api/health` wants `?token=` or an
 `x-token` header. Set the same token on the app card with **Link** and the
 dashboard link opens it signed in. Anyone who can open the dashboard can then
 open the app; the dashboard can already stop it, so that grant is small but real.
