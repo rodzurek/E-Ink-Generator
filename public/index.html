@@ -58,6 +58,7 @@
       <div class="row">
         <button id="go">Generate</button>
         <a class="button" id="download" download="eink-240x240.png" hidden>Download PNG</a>
+        <button id="send" hidden>Send</button>
         <span class="muted" id="status"></span>
       </div>
 
@@ -81,8 +82,9 @@
       black: [0, 0, 0], white: [255, 255, 255], red: [255, 0, 0], yellow: [255, 255, 0],
       blue: [0, 0, 255], green: [0, 255, 0], orange: [255, 128, 0],
     };
+    const SPECTRA_6 = 'Spectra 6 — black, white, red, yellow, blue, green';
     const PALETTES = {
-      'Spectra 6 — black, white, red, yellow, blue, green': ['black', 'white', 'red', 'yellow', 'blue', 'green'],
+      [SPECTRA_6]: ['black', 'white', 'red', 'yellow', 'blue', 'green'],
       'ACeP 7 — black, white, red, yellow, blue, green, orange': ['black', 'white', 'red', 'yellow', 'blue', 'green', 'orange'],
       '4-color — black, white, red, yellow': ['black', 'white', 'red', 'yellow'],
       '3-color — black, white, red': ['black', 'white', 'red'],
@@ -92,6 +94,12 @@
     // What goes in front of the shared panel rules; [SUBJECT] is the text typed.
     // There is deliberately no way to send the text bare: without the panel
     // rules the result does not survive 240x240 and six inks.
+    // Both displays are Spectra 6 panels, the 1.54inch e-Paper Module (E). Its
+    // color codes, from Waveshare's EPD_1in54e driver demo
+    // (github.com/waveshareteam/1.54inch_e-Paper_E) and checked with a color
+    // band test on the wired panel. Codes 4 and 7 are not inks.
+    const PANEL_CODES = { black: 0x0, white: 0x1, yellow: 0x2, red: 0x3, blue: 0x5, green: 0x6 };
+
     const STYLES = {
       'Flat graphic': 'Create a square image of [SUBJECT] in a clean flat graphic style, with one clear main subject, large and centered.',
       'Bob Ross landscape': 'Create a simple landscape scene of [SUBJECT] in a Bob Ross–inspired style, with happy little trees, layered mountains, soft nature composition, and a peaceful outdoor feeling. Use large simplified shapes and a calm scenic layout.',
@@ -115,6 +123,8 @@
     let savedName = null;
     // What OpenAI reported for the generation on screen, as text for the status line.
     let usageNote = '';
+    // The partner whose display Send goes to, from /api/info; null when there is none.
+    let partner = null;
 
     for (const label of Object.keys(PALETTES)) $('palette').add(new Option(label, label));
     for (const label of Object.keys(STYLES)) $('style').add(new Option(label, label));
@@ -163,10 +173,9 @@
       return best;
     }
 
-    function render() {
-      if (!source) return;
-      const colors = inks().map((name) => INK[name]);
-      const dither = $('dither').checked;
+    // The source reduced to the given inks, as ImageData.
+    function reduce(names, dither) {
+      const colors = names.map((name) => INK[name]);
       const px = new Float32Array(source.data);
       const out = new ImageData(SIZE, SIZE);
       for (let y = 0; y < SIZE; y++) {
@@ -187,7 +196,13 @@
           out.data[i + 3] = 255;
         }
       }
-      ctx.putImageData(out, 0, 0);
+      return out;
+    }
+
+    function render() {
+      if (!source) return;
+      ctx.putImageData(reduce(inks(), $('dither').checked), 0, 0);
+      $('send').hidden = !partner;
       canvas.toBlob((blob) => {
         const link = $('download');
         if (link.href) URL.revokeObjectURL(link.href);
@@ -210,6 +225,55 @@
           if (name === savedName) $('status').textContent = [`saved as ${d.saved}`, usageNote].filter(Boolean).join(' · ');
         })
         .catch((e) => { $('status').textContent = `${SIZE}x${SIZE} copy not saved: ${e.message}`; });
+    }
+
+    // The panel's frame: row by row from the top left, two pixels per byte,
+    // the left one in the high nibble. Every pixel must already be a pure ink.
+    function packFrame(image) {
+      const code = new Map(Object.entries(PANEL_CODES).map(([name, value]) => [INK[name].join(), value]));
+      const frame = new Uint8Array(SIZE * SIZE / 2);
+      for (let p = 0; p < SIZE * SIZE; p++) {
+        const value = code.get(`${image.data[p * 4]},${image.data[p * 4 + 1]},${image.data[p * 4 + 2]}`);
+        frame[p >> 1] |= (p & 1) ? value : value << 4;
+      }
+      return frame;
+    }
+
+    function base64(bytes) {
+      let text = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      return btoa(text);
+    }
+
+    // Always packed from Spectra 6, whatever the palette picklist shows: a frame
+    // from any other palette would come out wrong on the panel. The dither
+    // setting is kept.
+    async function sendToPartner() {
+      if (!source || !partner) return;
+      const name = savedName;
+      const image = reduce(PALETTES[SPECTRA_6], $('dither').checked);
+      const body = { frame: base64(packFrame(image)) };
+      if (name) {
+        body.name = name;
+      } else {
+        // Converted in the browser, so the server needs the picture too.
+        const scratch = document.createElement('canvas');
+        scratch.width = scratch.height = SIZE;
+        scratch.getContext('2d').putImageData(image, 0, 0);
+        body.image = scratch.toDataURL('image/png').split(',')[1];
+      }
+      $('send').disabled = true;
+      $('status').textContent = `sending to ${partner.name}…`;
+      try {
+        const res = await api('/api/send', { method: 'POST', headers, body: JSON.stringify(body) });
+        const d = await res.json();
+        if (d.error) throw new Error(d.error);
+        $('status').textContent = `sent to ${d.to}'s display`;
+      } catch (e) {
+        $('status').textContent = `not sent: ${e.message}`;
+      } finally {
+        $('send').disabled = false;
+      }
     }
 
     function load(src) {
@@ -283,6 +347,7 @@
     }
 
     $('go').addEventListener('click', generate);
+    $('send').addEventListener('click', sendToPartner);
     for (const id of ['camera', 'upload']) {
       $(id).addEventListener('change', () => {
         convert($(id).files[0]);
@@ -310,6 +375,9 @@
       .then((r) => r.json())
       .then((d) => {
         if (d.error) throw new Error(d.error);
+        partner = d.partner;
+        if (partner) $('send').textContent = `Send to ${partner.name}`;
+        $('send').hidden = !(partner && source);
         $('info').textContent = d.ready ? `${SIZE}×${SIZE} colored e-ink images` : 'OPENAI_API_KEY is not set on the server';
         for (const model of d.models) $('model').add(new Option(model, model));
         // Start on the last model picked in this browser, else the server's default.
