@@ -6,7 +6,7 @@ the install needs no setup commands and nothing to build. It runs as a systemd
 **user** unit the agent writes for you, which needs no root and no sudoers line.
 
 ```
-server.js           static files from public/, /api/health, /api/generate, /api/dithered, who is calling
+server.js           static files from public/, /api/health, /api/generate, /api/dithered, /api/send, who is calling
 access.js           Cloudflare Access token check, config.json users and devices
 config.example.json users, partners and devices; copy to config.json (git-ignored)
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
@@ -58,8 +58,49 @@ or files; on a computer both open the file picker, and Ctrl+V anywhere on the
 page pastes an image. Any picture the browser can open works. The page crops it
 to a centered square, scales it to 240x240 and renders it with the same palette
 and dither settings. It costs nothing: OpenAI is not called. The conversion
-happens in the browser and the file never reaches the server, so it is not
-stored in `images/`; use **Download PNG** to keep the result.
+happens in the browser and the original file never reaches the server. It is
+stored in `images/` only when it is sent (240x240 copy and frame); otherwise
+use **Download PNG** to keep the result.
+
+## Sending to the partner's display
+
+Once an image is on screen, generated or converted, **Send to <partner>**
+appears. It packs the image into the panel's own frame and posts it to
+`/api/send`; the server stores it and makes it the current frame for the
+partner's display, which fetches it from there (the device endpoints).
+
+Both displays are Spectra 6 panels, so the frame is always reduced to the
+Spectra 6 inks, whatever the palette picklist shows; the dither setting is
+kept. The other palettes only change the preview and the download.
+
+The frame is 240x240 pixels at 4 bits, 28,800 bytes: row by row from the top
+left, two pixels per byte, the left pixel in the high nibble. The ink codes
+are those of the 1.54inch e-Paper Module (E), taken from Waveshare's
+`EPD_1in54e` driver demo (github.com/waveshareteam/1.54inch_e-Paper_E) and
+checked with a color band test on the wired panel:
+
+| Ink    | Code  |
+| ------ | ----- |
+| black  | `0x0` |
+| white  | `0x1` |
+| yellow | `0x2` |
+| red    | `0x3` |
+| blue   | `0x5` |
+| green  | `0x6` |
+
+`PANEL_CODES` in `public/index.html` holds them; the server refuses a frame
+with any other code, or that is not exactly 28,800 bytes.
+
+`POST /api/send` takes `{ frame, name }` for a stored generation, or
+`{ frame, image }` with the 240x240 PNG for a converted image, which the server
+has never seen. The frame is written as `images/<stamp>.bin`. A converted
+image gets its own entry: `<stamp>-240.png`, `<stamp>.bin` and a `.json` with
+`created`, `createdBy` and `source: "upload"`. Then `inbox/<device>.json`
+(git-ignored, `INBOX_DIR`) for each of the partner's displays in
+`config.json` holds `frame` (the stamp), `sentBy`, `sentAt` and
+`deliveredAt` (`null` until the display acknowledges). There is no queue: a
+newer send replaces the frame. Sending needs a signed-in user (or `DEV_USER`)
+whose partner has a display.
 
 ## Stored images
 
@@ -84,7 +125,7 @@ last 50 generations, newest first: the 240x240 image, what was typed, the
 style, model, date and tokens, with the full prompt behind **Prompt sent**.
 Clicking an image opens its 1024x1024 original. It reads `images/` through
 `/api/generations` and `/api/images/<name>.png`; images converted from a photo
-or upload are not listed, because those are never stored.
+or upload are not listed: they are stored only when sent, without an original.
 
 If the folder cannot be written the image is still returned and the reason is
 logged. Nothing is ever deleted, so clear the folder yourself.
@@ -99,6 +140,7 @@ logged. Nothing is ever deleted, so clear the folder yourself.
 | `IMAGES_DIR`           | `images`      | where generations are stored; relative to the app folder |
 | `ACCESS_TEAM_DOMAIN`   | —             | e.g. `your-team.cloudflareaccess.com`; see **Cloudflare Access** |
 | `ACCESS_AUD`           | —             | the Access application's audience (AUD) tag    |
+| `INBOX_DIR`            | `inbox`       | each display's current frame; relative to the app folder |
 | `CONFIG_FILE`          | `config.json` | users, partners and devices; relative to the app folder |
 | `DEV_USER`             | —             | without Access: act as this user (an email in `config.json`) |
 | `DEV_DEVICE`           | —             | without Access: act as this device (an `id` in `config.json`) on `/api/device/*` |
