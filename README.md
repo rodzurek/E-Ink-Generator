@@ -6,7 +6,7 @@ the install needs no setup commands and nothing to build. It runs as a systemd
 **user** unit the agent writes for you, which needs no root and no sudoers line.
 
 ```
-server.js           static files from public/, /api/health, /api/generate, /api/dithered, /api/send, who is calling
+server.js           static files from public/, /api/health, /api/generate, /api/dithered, /api/send, /api/device/*, who is calling
 access.js           Cloudflare Access token check, config.json users and devices
 config.example.json users, partners and devices; copy to config.json (git-ignored)
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
@@ -101,6 +101,47 @@ image gets its own entry: `<stamp>-240.png`, `<stamp>.bin` and a `.json` with
 `deliveredAt` (`null` until the display acknowledges). There is no queue: a
 newer send replaces the frame. Sending needs a signed-in user (or `DEV_USER`)
 whose partner has a display.
+
+## The display's endpoints
+
+Displays pull; nothing is pushed to them. Both endpoints need a display's
+identity (its Access service token, or `DEV_DEVICE` locally), and a display
+only ever sees its own inbox.
+
+- `GET /api/device/frame?after=<frame id>` answers **204** when nothing was
+  sent to the display yet, or when `after` is already the current frame.
+  Otherwise **200** with the raw 28,800-byte frame as
+  `application/octet-stream`, a `Content-Length`, and the frame id in
+  `X-Frame-Id`. Leave `after` empty on the first call.
+- `POST /api/device/ack?frame=<frame id>` records `deliveredAt` in the
+  display's inbox after it has drawn the frame and answers **200** with
+  `{ frame, deliveredAt }`. Acknowledging again keeps the first time. A frame
+  that has since been replaced by a newer send answers **409** and leaves
+  the newer one undelivered; with nothing sent, **404**.
+
+The app also answers 401 or 403 on these routes when it refuses an Access
+token that Cloudflare let through (a display not in `config.json`); those
+come with a JSON body, Cloudflare's own refusals do not.
+
+To try it through the tunnel, with a display's service token (the secret
+stays in your shell, never in a file in the repo):
+
+```
+export CF_ID='<service token Client ID>'
+export CF_SECRET='<service token Client Secret>'
+AUTH=(-H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET")
+
+# 1. Send an image to that display's owner from the other partner's phone.
+# 2. Fetch it: note X-Frame-Id in the headers; the frame lands in frame.bin.
+curl -sS -D - -o frame.bin "${AUTH[@]}" 'https://ink.rod.la/api/device/frame?after='
+# 3. Asking again with that id answers 204.
+curl -sS -o /dev/null -w '%{http_code}\n' "${AUTH[@]}" 'https://ink.rod.la/api/device/frame?after=<frame id>'
+# 4. Acknowledge it.
+curl -sS -X POST "${AUTH[@]}" 'https://ink.rod.la/api/device/ack?frame=<frame id>'
+```
+
+Without the two headers, or with a revoked or expired token, Cloudflare stops
+the request (a redirect to its login, or a refusal), so it never reaches the app.
 
 ## Stored images
 
