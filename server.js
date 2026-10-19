@@ -35,6 +35,14 @@ const SAVED_NAME = new RegExp(`^${STAMP}$`);
 const IMAGE_PATH = new RegExp(`^/api/images/(${STAMP}(?:-240)?\\.png)$`);
 const HISTORY_LIMIT = 50;
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+// The panel's own frame: 240x240 pixels at 4 bits, two per byte.
+const PANEL_SIZE = 240;
+const FRAME_BYTES = (PANEL_SIZE * PANEL_SIZE) / 2;
+// The six Spectra 6 ink codes (see packFrame in public/index.html); anything
+// else in a frame means it was packed from the wrong palette.
+const INK_CODES = new Set([0x0, 0x1, 0x2, 0x3, 0x5, 0x6]);
+// A base64 frame plus, for a converted image, its base64 240x240 PNG.
+const MAX_SEND_BODY = 640 * 1024;
 // Image generation is slow; give up before a proxy in front of us does.
 const UPSTREAM_TIMEOUT_MS = 180_000;
 
@@ -84,12 +92,24 @@ function readJson(req, limit = MAX_BODY) {
   });
 }
 
+function newStamp() {
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+// Written beside and then renamed over, so a display reading the file never
+// sees half of it.
+async function writeAtomic(file, data) {
+  const temp = `${file}.${crypto.randomBytes(3).toString('hex')}.tmp`;
+  await fs.promises.writeFile(temp, data);
+  await fs.promises.rename(temp, file);
+}
+
 // Writes <stamp>.png (the 1024x1024 original) and <stamp>.json (the prompt and
 // settings) side by side. Returns the base name, or null when saving is off or
 // failed: a generation that was paid for is still returned to the page.
 async function saveImage(imagesDir, image, meta) {
   if (!imagesDir) return null;
-  const name = `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
+  const name = newStamp();
   try {
     await fs.promises.mkdir(imagesDir, { recursive: true });
     await fs.promises.writeFile(path.join(imagesDir, `${name}.png`), Buffer.from(image, 'base64'));
@@ -168,6 +188,76 @@ async function saveDithered(req, res, { imagesDir }) {
   }
 }
 
+// Sends a packed frame to the partner's display. The frame comes with either
+// the name of a stored generation or, for an image converted in the browser
+// (which the server never saw), its 240x240 PNG, which then gets its own
+// stored entry. The frame is stored as <stamp>.bin and becomes the current
+// frame in each of the partner's device inboxes; a newer send replaces it.
+async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
+  if (!user) return send(res, 403, { error: 'sending needs a signed-in user' });
+  if (!imagesDir || !inboxDir) return send(res, 404, { error: 'image storage is off' });
+  const partner = user.partner ? config.users.get(user.partner) : null;
+  if (!partner) return send(res, 409, { error: 'you have no partner set in config.json' });
+  const devices = [...config.devices.values()].filter((d) => d.owner === partner.email);
+  if (!devices.length) return send(res, 409, { error: `${partner.name} has no display set in config.json` });
+
+  let body;
+  try {
+    body = await readJson(req, MAX_SEND_BODY);
+  } catch (e) {
+    return send(res, 400, { error: e.message });
+  }
+  const frame = Buffer.from(typeof body.frame === 'string' ? body.frame : '', 'base64');
+  if (frame.length !== FRAME_BYTES) return send(res, 400, { error: `frame must be ${FRAME_BYTES} bytes` });
+  if (!frame.every((b) => INK_CODES.has(b >> 4) && INK_CODES.has(b & 0xf))) {
+    return send(res, 400, { error: 'frame holds a color the panel does not have' });
+  }
+  const hasName = body.name !== undefined;
+  const hasImage = body.image !== undefined;
+  if (hasName === hasImage) return send(res, 400, { error: 'send either the name of a stored image or an image' });
+
+  let name;
+  if (hasName) {
+    name = typeof body.name === 'string' ? body.name : '';
+    if (!SAVED_NAME.test(name)) return send(res, 400, { error: 'name is not a stored image' });
+    try {
+      await fs.promises.access(path.join(imagesDir, `${name}.png`));
+    } catch {
+      return send(res, 404, { error: 'name is not a stored image' });
+    }
+  } else {
+    const png = Buffer.from(typeof body.image === 'string' ? body.image : '', 'base64');
+    if (!png.subarray(0, 8).equals(PNG_MAGIC)) return send(res, 400, { error: 'image must be a base64 PNG' });
+    // Width and height are the first fields of the IHDR chunk, right after the signature.
+    if (png.length < 24 || png.readUInt32BE(16) !== PANEL_SIZE || png.readUInt32BE(20) !== PANEL_SIZE) {
+      return send(res, 400, { error: `image must be ${PANEL_SIZE}x${PANEL_SIZE}` });
+    }
+    name = newStamp();
+    try {
+      await fs.promises.mkdir(imagesDir, { recursive: true });
+      await fs.promises.writeFile(path.join(imagesDir, `${name}-240.png`), png);
+      const meta = { created: new Date().toISOString(), createdBy: user.email, source: 'upload' };
+      await fs.promises.writeFile(path.join(imagesDir, `${name}.json`), JSON.stringify(meta, null, 2) + '\n');
+    } catch (e) {
+      console.error(`could not save image to ${imagesDir}: ${e.message}`);
+      return send(res, 500, { error: 'could not store the image' });
+    }
+  }
+
+  const entry = { frame: name, sentBy: user.email, sentAt: new Date().toISOString(), deliveredAt: null };
+  try {
+    await fs.promises.writeFile(path.join(imagesDir, `${name}.bin`), frame);
+    await fs.promises.mkdir(inboxDir, { recursive: true });
+    for (const device of devices) {
+      await writeAtomic(path.join(inboxDir, `${device.id}.json`), JSON.stringify(entry, null, 2) + '\n');
+    }
+  } catch (e) {
+    console.error(`could not send ${name}: ${e.message}`);
+    return send(res, 500, { error: 'could not store the frame' });
+  }
+  return send(res, 200, { sent: name, to: partner.name, devices: devices.map((d) => d.id) });
+}
+
 async function generate(req, res, { apiKey, models, model: defaultModel, quality, imagesDir, fetchImpl, user }) {
   if (!apiKey) return send(res, 503, { error: 'OPENAI_API_KEY is not set on the server' });
 
@@ -233,7 +323,7 @@ async function whoIs(req, res, { verify, config, standIn }) {
 // parseConfig returns. devUser / devDevice stand in for a signed-in user and a
 // device when Access is off, for local runs.
 export function createApp({
-  token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', imagesDir = '', fetchImpl = fetch,
+  token = '', apiKey = '', model = 'gpt-image-1', quality = 'low', imagesDir = '', inboxDir = '', fetchImpl = fetch,
   access = null, config = parseConfig(), devUser = '', devDevice = '',
 } = {}) {
   // OPENAI_IMAGE_MODEL may name a model that is not in the list; offer it too.
@@ -323,6 +413,11 @@ export function createApp({
       return generate(req, res, { apiKey, models, model, quality, imagesDir, fetchImpl, user });
     }
 
+    if (url.pathname === '/api/send') {
+      if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+      return sendFrame(req, res, { imagesDir, inboxDir, config, user });
+    }
+
     if (url.pathname === '/api/dithered') {
       if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
       return saveDithered(req, res, { imagesDir });
@@ -387,6 +482,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
       quality: process.env.OPENAI_IMAGE_QUALITY || 'low',
       imagesDir: path.resolve(HERE, process.env.IMAGES_DIR || 'images'),
+      inboxDir: path.resolve(HERE, process.env.INBOX_DIR || 'inbox'),
       access: teamDomain ? { teamDomain, audience } : null,
       config,
       devUser,

@@ -369,3 +369,116 @@ test('config.json mistakes stop the server instead of locking someone out', () =
   assert.throws(() => parseConfig({ users: [{ email: 'a@x' }], devices: [{ id: '../d', clientId: 'c', owner: 'a@x' }] }), /device id/);
   assert.throws(() => parseConfig({ users: [{ email: 'a@x' }], devices: [{ id: 'd', owner: 'a@x' }] }), /clientId/);
 });
+
+// Sending: the stand-in user is Rod, whose partner Ampy owns ampy-display.
+const sendConfig = parseConfig({
+  users: [
+    { email: 'rod@example.com', name: 'Rod', partner: 'ampy@example.com' },
+    { email: 'ampy@example.com', name: 'Ampy', partner: 'rod@example.com' },
+    { email: 'solo@example.com', name: 'Solo' },
+  ],
+  devices: [
+    { id: 'rod-display', clientId: 'rod.access', owner: 'rod@example.com' },
+    { id: 'ampy-display', clientId: 'ampy.access', owner: 'ampy@example.com' },
+  ],
+});
+// All white (code 1 in both nibbles), the right size for the panel.
+const whiteFrame = Buffer.alloc(28_800, 0x11);
+// Only what the server reads of a PNG: the signature and the IHDR width and height.
+function fakePng(width = 240, height = 240) {
+  const png = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
+  png.write('IHDR', 12, 'ascii');
+  png.writeUInt32BE(width, 16);
+  png.writeUInt32BE(height, 20);
+  return png;
+}
+
+async function withSendServer(options, fn) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
+  const imagesDir = path.join(dir, 'images');
+  const inboxDir = path.join(dir, 'inbox');
+  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
+  try {
+    await withServer({ apiKey: 'sk-test', imagesDir, inboxDir, fetchImpl, config: sendConfig, devUser: 'rod@example.com', ...options }, (base) => fn(base, { imagesDir, inboxDir }));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+function sendImage(base, body) {
+  return fetch(`${base}/api/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+test('send: a stored generation goes to the partner\'s display', async () => {
+  await withSendServer({}, async (base, { imagesDir, inboxDir }) => {
+    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+    const res = await sendImage(base, { name: saved, frame: whiteFrame.toString('base64') });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { sent: saved, to: 'Ampy', devices: ['ampy-display'] });
+    assert.deepEqual(await fs.readFile(path.join(imagesDir, `${saved}.bin`)), whiteFrame);
+
+    const inbox = JSON.parse(await fs.readFile(path.join(inboxDir, 'ampy-display.json'), 'utf8'));
+    assert.equal(inbox.frame, saved);
+    assert.equal(inbox.sentBy, 'rod@example.com');
+    assert.ok(Date.parse(inbox.sentAt));
+    assert.equal(inbox.deliveredAt, null);
+    assert.deepEqual(await fs.readdir(inboxDir), ['ampy-display.json']);
+  });
+});
+
+test('send: a converted image gets its own stored entry, and a newer send replaces the frame', async () => {
+  await withSendServer({}, async (base, { imagesDir, inboxDir }) => {
+    const first = await (await sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') })).json();
+    assert.match(first.sent, /^\d{4}-\d{2}-\d{2}T[\d-]+Z-[0-9a-f]{6}$/);
+    assert.deepEqual((await fs.readdir(imagesDir)).sort(), [`${first.sent}-240.png`, `${first.sent}.bin`, `${first.sent}.json`]);
+    assert.deepEqual(await fs.readFile(path.join(imagesDir, `${first.sent}-240.png`)), fakePng());
+    const meta = JSON.parse(await fs.readFile(path.join(imagesDir, `${first.sent}.json`), 'utf8'));
+    assert.equal(meta.source, 'upload');
+    assert.equal(meta.createdBy, 'rod@example.com');
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const black = Buffer.alloc(28_800, 0x00).toString('base64');
+    const second = await (await sendImage(base, { image: fakePng().toString('base64'), frame: black })).json();
+    const inbox = JSON.parse(await fs.readFile(path.join(inboxDir, 'ampy-display.json'), 'utf8'));
+    assert.equal(inbox.frame, second.sent);
+    assert.notEqual(second.sent, first.sent);
+  });
+});
+
+test('send: wrong frames, names and images are refused', async () => {
+  await withSendServer({}, async (base, { inboxDir }) => {
+    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+    const frame = whiteFrame.toString('base64');
+    const image = fakePng().toString('base64');
+    const refused = [
+      [400, 'short frame', { name: saved, frame: Buffer.alloc(28_799, 0x11).toString('base64') }],
+      [400, 'long frame', { name: saved, frame: Buffer.alloc(28_801, 0x11).toString('base64') }],
+      [400, 'no frame', { name: saved }],
+      [400, 'not an ink', { name: saved, frame: Buffer.alloc(28_800, 0x14).toString('base64') }],
+      [400, 'name and image', { name: saved, image, frame }],
+      [400, 'neither', { frame }],
+      [400, 'bad name', { name: '../server', frame }],
+      [404, 'unknown name', { name: '2000-01-01T00-00-00-000Z-abcdef', frame }],
+      [400, 'not a PNG', { image: 'aGVsbG8=', frame }],
+      [400, 'wrong size PNG', { image: fakePng(1024, 1024).toString('base64'), frame }],
+    ];
+    for (const [status, why, body] of refused) assert.equal((await sendImage(base, body)).status, status, why);
+    assert.equal((await fetch(`${base}/api/send`)).status, 405);
+    await assert.rejects(fs.readdir(inboxDir));
+  });
+});
+
+test('send: needs a user with a partner who has a display', async () => {
+  const body = { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') };
+  await withSendServer({ devUser: '' }, async (base) => {
+    assert.equal((await sendImage(base, body)).status, 403);
+  });
+  await withSendServer({ devUser: 'solo@example.com' }, async (base) => {
+    assert.equal((await sendImage(base, body)).status, 409);
+  });
+  const noDisplay = parseConfig({ users: [{ email: 'a@x', partner: 'b@x' }, { email: 'b@x', partner: 'a@x' }] });
+  await withSendServer({ config: noDisplay, devUser: 'a@x' }, async (base) => {
+    assert.equal((await sendImage(base, body)).status, 409);
+  });
+});
