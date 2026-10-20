@@ -10,7 +10,8 @@ server.js           static files from public/, /api/health, /api/generate, /api/
 access.js           Cloudflare Access token check, config.json users and devices
 config.example.json users, partners and devices; copy to config.json (git-ignored)
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
-public/history.html the last 50 generations
+public/panel.js     shared by both pages: the inks, reduce and dither, packing the panel's frame
+public/history.html the last 50 generations, each with Send to the partner
 public/icon-*.png   app icons for the Android install
 server.test.mjs     node --test, run with `npm test`
 homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill the dialog
@@ -88,7 +89,7 @@ checked with a color band test on the wired panel:
 | blue   | `0x5` |
 | green  | `0x6` |
 
-`PANEL_CODES` in `public/index.html` holds them; the server refuses a frame
+`PANEL_CODES` in `public/panel.js` holds them; the server refuses a frame
 with any other code, or that is not exactly 28,800 bytes.
 
 `POST /api/send` takes `{ frame, name }` for a stored generation, or
@@ -167,6 +168,12 @@ style, model, date and tokens, with the full prompt behind **Prompt sent**.
 Clicking an image opens its 1024x1024 original. It reads `images/` through
 `/api/generations` and `/api/images/<name>.png`; images converted from a photo
 or upload are not listed: they are stored only when sent, without an original.
+
+With a partner set (see Sending to the partner's display), each card has **Send to <partner>**. It packs
+the frame again from the 1024x1024 original, reduced to Spectra 6 and
+dithered, the generator's defaults, so a stored 240x240 copy rendered in
+another palette still comes out right on the panel. It replaces whatever the
+partner's display shows, like Send on the generator.
 
 If the folder cannot be written the image is still returned and the reason is
 logged. Nothing is ever deleted, so clear the folder yourself.

@@ -38,7 +38,7 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 // The panel's own frame: 240x240 pixels at 4 bits, two per byte.
 const PANEL_SIZE = 240;
 const FRAME_BYTES = (PANEL_SIZE * PANEL_SIZE) / 2;
-// The six Spectra 6 ink codes (see packFrame in public/index.html); anything
+// The six Spectra 6 ink codes (see packFrame in public/panel.js); anything
 // else in a frame means it was packed from the wrong palette.
 const INK_CODES = new Set([0x0, 0x1, 0x2, 0x3, 0x5, 0x6]);
 // A base64 frame plus, for a converted image, its base64 240x240 PNG.
