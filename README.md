@@ -191,6 +191,31 @@ If the folder cannot be written the image is still returned and the reason is
 logged. Nothing is deleted except through **Delete** on History, and a frame
 kept for a display stays until you clear it yourself.
 
+## OpenAI API key
+
+The server is the only place the key lives; the page never sees it.
+
+1. Sign in at <https://platform.openai.com>, add billing under **Settings →
+   Billing**, and set a monthly budget under **Limits** so a runaway prompt
+   loop cannot get expensive.
+2. The GPT Image models need a verified organization: **Settings →
+   Organization → General → Verify Organization**. Without it every
+   generation fails with an error from OpenAI, shown on the page.
+3. Under **API keys**, create a new secret key, ideally in its own project.
+   With permissions set to **Restricted**, the app needs write access to
+   **Images** only. Copy the key: it is shown once.
+4. Give it to the server as `OPENAI_API_KEY`:
+   - **Locally:** put `OPENAI_API_KEY=sk-...` in `.env` (copied from
+     `.env.example`; git-ignored) and restart `npm start`.
+   - **Dashboard install:** add `OPENAI_API_KEY=sk-...` to the **Environment**
+     field (see **Install it from the dashboard**), then restart the app.
+
+To check it: the page's header line reads "240×240 colored e-ink images" when
+the key is set and "OPENAI_API_KEY is not set on the server" when it is not.
+To rotate it, create a new key, swap it in, restart, then revoke the old one.
+Never commit it: `.env` is ignored, `.env.example` must only ever hold
+`sk-change-me`.
+
 ## Environment
 
 | Variable               | Default       | Meaning                                        |
