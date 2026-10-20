@@ -355,6 +355,30 @@ async function deviceFrame(res, url, { imagesDir, inboxDir, device }) {
   return res.end(frame);
 }
 
+// Every authenticated request from a display counts as a sign of life, kept as
+// inbox/<device>.seen (an ISO time) so it survives a restart. Not .json, so
+// deleteGeneration does not take it for an inbox.
+async function markSeen(inboxDir, device) {
+  if (!inboxDir) return;
+  try {
+    await fs.promises.mkdir(inboxDir, { recursive: true });
+    await writeAtomic(path.join(inboxDir, `${device.id}.seen`), new Date().toISOString());
+  } catch (e) {
+    console.error(`could not record ${device.id} as seen: ${e.message}`);
+  }
+}
+
+// When the display last called, or null if it never has.
+async function lastSeen(inboxDir, device) {
+  if (!inboxDir) return null;
+  try {
+    return (await fs.promises.readFile(path.join(inboxDir, `${device.id}.seen`), 'utf8')).trim() || null;
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
 // The display drew ?frame=<id>: record when, so the sender can see it arrived.
 // Only the current frame can be acknowledged, and the first time is kept.
 async function deviceAck(res, url, { inboxDir, device }) {
@@ -480,6 +504,7 @@ export function createApp({
     if (deviceRoute) {
       if (identity?.kind !== 'device') return send(res, 403, { error: 'only a display can use /api/device/' });
       const { device } = identity;
+      await markSeen(inboxDir, device);
       if (url.pathname === '/api/device/frame') {
         if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
         return deviceFrame(res, url, { imagesDir, inboxDir, device });
@@ -505,9 +530,14 @@ export function createApp({
     if (url.pathname === '/api/info') {
       const partner = user?.partner ? config.users.get(user.partner) : null;
       const person = (u) => (u ? { email: u.email, name: u.name } : null);
+      // The user's and the partner's displays, with when each last called.
+      const owners = [user, partner].filter(Boolean);
+      const displays = await Promise.all([...config.devices.values()]
+        .filter((d) => owners.some((u) => u.email === d.owner))
+        .map(async (d) => ({ id: d.id, owner: config.users.get(d.owner)?.name ?? d.owner, lastSeen: await lastSeen(inboxDir, d) })));
       return send(res, 200, {
         name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, models, ready: Boolean(apiKey),
-        user: person(user), partner: person(partner),
+        user: person(user), partner: person(partner), displays,
       });
     }
 

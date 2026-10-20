@@ -120,6 +120,12 @@ only ever sees its own inbox.
   that has since been replaced by a newer send answers **409** and leaves
   the newer one undelivered; with nothing sent, **404**.
 
+Every call a display makes on these routes is written to
+`inbox/<device>.seen` as an ISO time. `/api/info` returns it as `displays`
+(`{ id, owner, lastSeen }` for the user's and the partner's displays), and the
+main page shows it under the title: "Rod's display seen 3 min ago", with the
+exact time on hover, refreshed every minute.
+
 The app also answers 401 or 403 on these routes when it refuses an Access
 token that Cloudflare let through (a display not in `config.json`); those
 come with a JSON body, Cloudflare's own refusals do not.

@@ -550,6 +550,22 @@ test('device: a send and an acknowledge at the same moment do not lose the new f
   });
 });
 
+test('device: every call records when the display was last seen, shown in /api/info', async () => {
+  await withSendServer(asAmpyDisplay, async (base, { inboxDir }) => {
+    const before = (await (await fetch(`${base}/api/info`)).json()).displays;
+    assert.deepEqual(before, [
+      { id: 'rod-display', owner: 'Rod', lastSeen: null },
+      { id: 'ampy-display', owner: 'Ampy', lastSeen: null },
+    ]);
+
+    assert.equal((await fetch(`${base}/api/device/frame`)).status, 204);
+    const seen = await fs.readFile(path.join(inboxDir, 'ampy-display.seen'), 'utf8');
+    assert.ok(Math.abs(Date.parse(seen) - Date.now()) < 5000);
+    const after = (await (await fetch(`${base}/api/info`)).json()).displays;
+    assert.deepEqual(after.map((d) => d.lastSeen), [null, seen]);
+  });
+});
+
 test('device: only a known display, and only its own inbox', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
   const imagesDir = path.join(dir, 'images');
