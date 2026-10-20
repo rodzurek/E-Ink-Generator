@@ -23,6 +23,9 @@
     details { margin-top: 0.35rem; font-size: 0.8125rem; }
     summary { cursor: pointer; color: var(--muted); }
     details p { white-space: pre-wrap; }
+    .send { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.875rem; }
+    button { font: inherit; padding: 0.35rem 0.8rem; border-radius: 8px; border: 1px solid var(--line); background: var(--accent); color: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: default; }
   </style>
 </head>
 <body>
@@ -31,11 +34,15 @@
     <p class="muted"><a id="back" href="/">← Generator</a> · <span id="info">loading…</span></p>
     <div class="grid" id="grid"></div>
   </main>
-  <script>
+  <script type="module">
     const $ = (id) => document.getElementById(id);
     // Carry the token through, so API calls, images and links work when the page was opened with ?token=.
     const token = new URLSearchParams(location.search).get('token');
     const carry = token ? '?token=' + encodeURIComponent(token) : '';
+    // Imported here rather than with a static import, so the token rides in its URL.
+    const { SIZE, PANEL_INKS, reduce, scale, packFrame, base64 } = await import('/panel.js' + carry);
+    // The partner whose display Send goes to, from /api/info; null when there is none.
+    let partner = null;
     $('back').href += carry;
     $('icon').href += carry;
 
@@ -65,6 +72,42 @@
       return node;
     }
 
+    function load(src) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('could not load the image'));
+        img.src = src;
+      });
+    }
+
+    // Packed again from the 1024x1024 original, reduced to Spectra 6 and
+    // dithered as the generator does by default: the stored 240x240 copy may
+    // show another palette, which would come out wrong on the panel.
+    async function sendToPartner(g, button, status) {
+      button.disabled = true;
+      status.textContent = `sending to ${partner.name}…`;
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = SIZE;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const source = scale(ctx, await load(`/api/images/${g.name}.png${carry}`));
+        const frame = base64(packFrame(reduce(source, PANEL_INKS, true)));
+        const res = await api('/api/send' + carry, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ frame, name: g.name }),
+        });
+        const d = await res.json();
+        if (d.error) throw new Error(d.error);
+        status.textContent = `sent to ${d.to}'s display`;
+      } catch (e) {
+        status.textContent = `not sent: ${e.message}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function card(g) {
       const node = element('div', '', 'card');
       const original = `/api/images/${g.name}.png${carry}`;
@@ -92,10 +135,24 @@
         details.append(element('summary', 'Prompt sent'), element('p', g.prompt));
         node.append(details);
       }
+
+      if (partner) {
+        const row = element('div', '', 'send');
+        const button = element('button', `Send to ${partner.name}`);
+        const status = element('span', '', 'muted');
+        button.addEventListener('click', () => sendToPartner(g, button, status));
+        row.append(button, status);
+        node.append(row);
+      }
       return node;
     }
 
-    api('/api/generations' + carry)
+    // Without a partner the page still lists the history, just with no Send buttons.
+    api('/api/info' + carry)
+      .then((r) => r.json())
+      .then((d) => { partner = d.partner || null; })
+      .catch(() => {})
+      .then(() => api('/api/generations' + carry))
       .then((r) => r.json())
       .then((d) => {
         if (d.error) throw new Error(d.error);
