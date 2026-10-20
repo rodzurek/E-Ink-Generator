@@ -6,12 +6,12 @@ the install needs no setup commands and nothing to build. It runs as a systemd
 **user** unit the agent writes for you, which needs no root and no sudoers line.
 
 ```
-server.js           static files from public/, /api/health, /api/generate, /api/dithered, /api/send, /api/device/*, who is calling
+server.js           static files from public/, /api/health, /api/generate, /api/dithered, /api/send, /api/delete, /api/device/*, who is calling
 access.js           Cloudflare Access token check, config.json users and devices
 config.example.json users, partners and devices; copy to config.json (git-ignored)
 public/index.html   the page: prompt, palette, downscale and dither, PNG download
 public/panel.js     shared by both pages: the inks, reduce and dither, packing the panel's frame
-public/history.html the last 50 generations, each with Send to the partner
+public/history.html the last 50 generations, each with Send to the partner and Delete
 public/icon-*.png   app icons for the Android install
 server.test.mjs     node --test, run with `npm test`
 homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill the dialog
@@ -175,8 +175,15 @@ dithered, the generator's defaults, so a stored 240x240 copy rendered in
 another palette still comes out right on the panel. It replaces whatever the
 partner's display shows, like Send on the generator.
 
+**Delete** on a card asks first, then removes that generation for good:
+`POST /api/delete` with `{ name }` deletes `<name>.png`, `<name>-240.png`,
+`<name>.json` and `<name>.bin`. A frame that is still the current one in a
+display's inbox is kept, so that display can still fetch it; the answer says
+so with `frameKept: true`. Either partner can delete any generation.
+
 If the folder cannot be written the image is still returned and the reason is
-logged. Nothing is ever deleted, so clear the folder yourself.
+logged. Nothing is deleted except through **Delete** on History, and a frame
+kept for a display stays until you clear it yourself.
 
 ## Environment
 
