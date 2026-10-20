@@ -23,9 +23,10 @@
     details { margin-top: 0.35rem; font-size: 0.8125rem; }
     summary { cursor: pointer; color: var(--muted); }
     details p { white-space: pre-wrap; }
-    .send { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.875rem; }
+    .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.875rem; }
     button { font: inherit; padding: 0.35rem 0.8rem; border-radius: 8px; border: 1px solid var(--line); background: var(--accent); color: #fff; cursor: pointer; }
     button:disabled { opacity: 0.6; cursor: default; }
+    button.delete { background: transparent; color: var(--fg); }
   </style>
 </head>
 <body>
@@ -108,6 +109,27 @@
       }
     }
 
+    // Asks first: the original, the 240x240 copy and the record go for good.
+    // A frame a display is still showing stays on the server until replaced.
+    async function deleteGeneration(g, node, buttons, status) {
+      if (!confirm(`Delete "${g.subject || g.name}"? This cannot be undone.`)) return;
+      for (const b of buttons) b.disabled = true;
+      status.textContent = 'deleting…';
+      try {
+        const res = await api('/api/delete' + carry, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: g.name }),
+        });
+        const d = await res.json();
+        if (d.error) throw new Error(d.error);
+        node.remove();
+      } catch (e) {
+        status.textContent = `not deleted: ${e.message}`;
+        for (const b of buttons) b.disabled = false;
+      }
+    }
+
     function card(g) {
       const node = element('div', '', 'card');
       const original = `/api/images/${g.name}.png${carry}`;
@@ -136,18 +158,23 @@
         node.append(details);
       }
 
+      const row = element('div', '', 'actions');
+      const status = element('span', '', 'muted');
+      const buttons = [];
       if (partner) {
-        const row = element('div', '', 'send');
-        const button = element('button', `Send to ${partner.name}`);
-        const status = element('span', '', 'muted');
-        button.addEventListener('click', () => sendToPartner(g, button, status));
-        row.append(button, status);
-        node.append(row);
+        const send = element('button', `Send to ${partner.name}`);
+        send.addEventListener('click', () => sendToPartner(g, send, status));
+        buttons.push(send);
       }
+      const remove = element('button', 'Delete', 'delete');
+      remove.addEventListener('click', () => deleteGeneration(g, node, buttons, status));
+      buttons.push(remove);
+      row.append(...buttons, status);
+      node.append(row);
       return node;
     }
 
-    // Without a partner the page still lists the history, just with no Send buttons.
+    // Without a partner the page still lists the history, just with no Send button.
     api('/api/info' + carry)
       .then((r) => r.json())
       .then((d) => { partner = d.partner || null; })
