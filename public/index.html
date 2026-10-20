@@ -40,6 +40,7 @@
     <div class="card">
       <h1>E-Ink Generator</h1>
       <p class="muted"><span id="info">loading…</span> · <a id="history" href="/history.html">History</a></p>
+      <p class="muted" id="displays" hidden></p>
 
       <label>Prompt
         <textarea id="prompt" placeholder="a red fox sitting under a yellow moon"></textarea>
@@ -297,6 +298,32 @@
       event.preventDefault();
       convert(file);
     });
+    // "Rod's display seen 3 min ago", with the exact time on hover.
+    function ago(iso) {
+      const minutes = Math.round((Date.now() - Date.parse(iso)) / 60_000);
+      if (minutes < 1) return 'just now';
+      if (minutes < 60) return `${minutes} min ago`;
+      if (minutes < 48 * 60) return `${Math.round(minutes / 60)} h ago`;
+      return `${Math.round(minutes / 1440)} days ago`;
+    }
+    function showDisplays(displays) {
+      const line = $('displays');
+      line.replaceChildren();
+      displays.forEach((d, i) => {
+        if (i) line.append(' · ');
+        const span = document.createElement('span');
+        span.textContent = `${d.owner}'s display ${d.lastSeen ? `seen ${ago(d.lastSeen)}` : 'never seen'}`;
+        if (d.lastSeen) span.title = new Date(d.lastSeen).toLocaleString();
+        line.append(span);
+      });
+      line.hidden = !displays.length;
+    }
+    // Kept current while the page stays open.
+    setInterval(() => {
+      if (document.hidden) return;
+      api('/api/info', { headers }).then((r) => r.json()).then((d) => { if (d.displays) showDisplays(d.displays); }).catch(() => {});
+    }, 60_000);
+
     $('model').addEventListener('change', () => {
       try { localStorage.setItem('model', $('model').value); } catch {}
     });
@@ -311,6 +338,7 @@
       .then((d) => {
         if (d.error) throw new Error(d.error);
         partner = d.partner;
+        showDisplays(d.displays || []);
         if (partner) $('send').textContent = `Send to ${partner.name}`;
         $('send').hidden = !(partner && source);
         $('info').textContent = d.ready ? `${SIZE}×${SIZE} colored e-ink images` : 'OPENAI_API_KEY is not set on the server';
