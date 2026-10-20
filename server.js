@@ -209,6 +209,55 @@ async function saveDithered(req, res, { imagesDir }) {
   }
 }
 
+// Deletes a stored generation: its original, its 240x240 copy, its .json and
+// its frame. A frame that is still current in a display's inbox is kept, so
+// that display can still fetch it; a newer send replaces it there.
+async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
+  if (!imagesDir) return send(res, 404, { error: 'image storage is off' });
+
+  let body;
+  try {
+    body = await readJson(req);
+  } catch (e) {
+    return send(res, 400, { error: e.message });
+  }
+  const name = typeof body.name === 'string' ? body.name : '';
+  // The name ends up in paths, so it must be one newStamp made.
+  if (!SAVED_NAME.test(name)) return send(res, 400, { error: 'name is not a stored image' });
+
+  let showing = false;
+  if (inboxDir) {
+    let inboxes = [];
+    try {
+      inboxes = (await fs.promises.readdir(inboxDir)).filter((file) => file.endsWith('.json'));
+    } catch {
+      // No inbox folder yet: nothing was ever sent.
+    }
+    for (const file of inboxes) {
+      const entry = await readInbox(path.join(inboxDir, file)).catch(() => null);
+      if (entry?.frame === name) showing = true;
+    }
+  }
+
+  const files = [`${name}.png`, `${name}-240.png`, `${name}.json`, ...(showing ? [] : [`${name}.bin`])];
+  let removed = 0;
+  try {
+    for (const file of files) {
+      try {
+        await fs.promises.unlink(path.join(imagesDir, file));
+        removed++;
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+      }
+    }
+  } catch (e) {
+    console.error(`could not delete ${name}: ${e.message}`);
+    return send(res, 500, { error: 'could not delete the image' });
+  }
+  if (!removed) return send(res, 404, { error: 'name is not a stored image' });
+  return send(res, 200, { deleted: name, frameKept: showing });
+}
+
 // Sends a packed frame to the partner's display. The frame comes with either
 // the name of a stored generation or, for an image converted in the browser
 // (which the server never saw), its 240x240 PNG, which then gets its own
@@ -491,6 +540,11 @@ export function createApp({
     if (url.pathname === '/api/send') {
       if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
       return sendFrame(req, res, { imagesDir, inboxDir, config, user });
+    }
+
+    if (url.pathname === '/api/delete') {
+      if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+      return deleteGeneration(req, res, { imagesDir, inboxDir });
     }
 
     if (url.pathname === '/api/dithered') {

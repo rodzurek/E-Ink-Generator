@@ -574,3 +574,39 @@ test('device: only a known display, and only its own inbox', async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+function deleteImage(base, name) {
+  return fetch(`${base}/api/delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) });
+}
+
+test('delete removes a generation and drops it from history', async () => {
+  await withSendServer({}, async (base, { imagesDir }) => {
+    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+    await fs.writeFile(path.join(imagesDir, `${saved}-240.png`), fakePng());
+    await fs.writeFile(path.join(imagesDir, 'notes.txt'), 'keep me');
+
+    const res = await deleteImage(base, saved);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { deleted: saved, frameKept: false });
+    assert.deepEqual(await fs.readdir(imagesDir), ['notes.txt']);
+    assert.deepEqual((await (await fetch(`${base}/api/generations`)).json()).generations, []);
+
+    assert.equal((await deleteImage(base, saved)).status, 404);
+    assert.equal((await deleteImage(base, '../server')).status, 400);
+    assert.equal((await fetch(`${base}/api/delete`)).status, 405);
+  });
+});
+
+test('delete keeps the frame a display is still showing', async () => {
+  await withSendServer(asAmpyDisplay, async (base, { imagesDir }) => {
+    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+    await sendImage(base, { name: saved, frame: whiteFrame.toString('base64') });
+
+    assert.deepEqual(await (await deleteImage(base, saved)).json(), { deleted: saved, frameKept: true });
+    assert.deepEqual(await fs.readdir(imagesDir), [`${saved}.bin`]);
+    // Ampy's display can still fetch what it was sent.
+    const frame = await fetch(`${base}/api/device/frame`);
+    assert.equal(frame.status, 200);
+    assert.deepEqual(Buffer.from(await frame.arrayBuffer()), whiteFrame);
+  });
+});
