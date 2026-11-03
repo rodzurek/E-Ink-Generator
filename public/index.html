@@ -31,8 +31,8 @@
     button, a.button, label.button { font: inherit; padding: 0.5rem 1rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; }
     button:disabled { opacity: 0.5; cursor: default; }
     a.button[hidden] { display: none; }
-    /* 240 real pixels, shown at 2x so the dither is visible. */
-    canvas { display: block; margin-top: 1rem; width: 480px; max-width: 100%; aspect-ratio: 1; image-rendering: pixelated; border: 1px solid var(--line); background: #fff; }
+    /* The panel's real pixels, shown at 2x so the dither is visible; the aspect is set from the panel. */
+    canvas { display: block; margin-top: 1rem; width: 480px; max-width: 100%; image-rendering: pixelated; border: 1px solid var(--line); background: #fff; }
   </style>
 </head>
 <body>
@@ -48,6 +48,9 @@
       <label>Image model
         <select id="model"></select>
       </label>
+      <label>Display
+        <select id="display"></select>
+      </label>
       <label>Panel palette
         <select id="palette"></select>
       </label>
@@ -58,7 +61,7 @@
 
       <div class="row">
         <button id="go">Generate</button>
-        <a class="button" id="download" download="eink-240x240.png" hidden>Download PNG</a>
+        <a class="button" id="download" hidden>Download PNG</a>
         <button id="send" hidden>Send</button>
         <span class="muted" id="status"></span>
       </div>
@@ -81,7 +84,7 @@
     const token = new URLSearchParams(location.search).get('token');
     const carry = token ? '?token=' + encodeURIComponent(token) : '';
     // Imported here rather than with a static import, so the token rides in its URL.
-    const { SIZE, PANEL_INKS, reduce: reduceTo, scale, packFrame, base64 } = await import('/panel.js' + carry);
+    const { DISPLAYS, PANELS, PANEL_INKS, viewOf, toPanel, reduce: reduceTo, scale, packFrame, base64 } = await import('/panel.js' + carry);
 
     const SPECTRA_6 = 'Spectra 6 — black, white, red, yellow, blue, green';
     const PALETTES = {
@@ -94,9 +97,9 @@
 
     // What goes in front of the shared panel rules; [SUBJECT] is the text typed.
     // There is deliberately no way to send the text bare: without the panel
-    // rules the result does not survive 240x240 and six inks.
+    // rules the result does not survive the panel's size and six inks.
     const STYLES = {
-      'Flat graphic': 'Create a square image of [SUBJECT] in a clean flat graphic style, with one clear main subject, large and centered.',
+      'Flat graphic': 'Create an image of [SUBJECT] in a clean flat graphic style, with one clear main subject, large and centered.',
       'Bob Ross landscape': 'Create a simple landscape scene of [SUBJECT] in a Bob Ross–inspired style, with happy little trees, layered mountains, soft nature composition, and a peaceful outdoor feeling. Use large simplified shapes and a calm scenic layout.',
       'Anime': 'Create an image of [SUBJECT] in a simple anime-inspired style with bold outlines, expressive features, stylized hair, and clean graphic shapes. Keep the design cute, readable, and uncluttered, with one clear central subject.',
       'Pixel art': 'Create a pixel-art style image of [SUBJECT] with a retro video game feel. Use blocky forms, simplified geometry, and a clear iconic silhouette. Keep the subject large and centered with a minimal background.',
@@ -112,8 +115,10 @@
     const $ = (id) => document.getElementById(id);
     const canvas = $('out');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    // The undithered 240x240 pixels, kept so palette and dither changes do not cost another API call.
+    // The undithered pixels at the panel's size, kept so palette and dither changes do not cost another API call.
     let source = null;
+    // The image as loaded, so a change of panel can scale it again.
+    let original = null;
     // The name the server stored that generation under, or null if it stored nothing.
     let savedName = null;
     // What OpenAI reported for the generation on screen, as text for the status line.
@@ -123,6 +128,21 @@
 
     for (const label of Object.keys(PALETTES)) $('palette').add(new Option(label, label));
     for (const label of Object.keys(STYLES)) $('style').add(new Option(label, label));
+    for (const display of DISPLAYS) $('display').add(new Option(display.label, display.id));
+    // Start on the last display picked in this browser.
+    try {
+      const remembered = localStorage.getItem('display');
+      if (DISPLAYS.some((d) => d.id === remembered)) $('display').value = remembered;
+    } catch {}
+    // The display picked: its panel and the orientation it is shown in.
+    function displayNow() {
+      return DISPLAYS.find((d) => d.id === $('display').value) ?? DISPLAYS[0];
+    }
+    // The shape of what is generated, converted and shown: the panel's, turned for portrait.
+    function viewNow() {
+      const { panel, orientation } = displayNow();
+      return viewOf(panel, orientation);
+    }
     // Start on the last style picked in this browser.
     try {
       const remembered = localStorage.getItem('style');
@@ -165,6 +185,7 @@
       if (!source) return;
       ctx.putImageData(reduce(inks(), $('dither').checked), 0, 0);
       $('send').hidden = !partner;
+      $('download').download = `eink-${source.width}x${source.height}.png`;
       canvas.toBlob((blob) => {
         const link = $('download');
         if (link.href) URL.revokeObjectURL(link.href);
@@ -174,35 +195,39 @@
       storeDithered();
     }
 
-    // Keeps the stored 240x240 copy in step with what is on screen: a palette
-    // or dither change overwrites it.
+    // Keeps the stored copy for this panel in step with what is on screen: a
+    // palette or dither change overwrites it.
     function storeDithered() {
       if (!savedName) return;
       const name = savedName;
       const image = canvas.toDataURL('image/png').split(',')[1];
-      api('/api/dithered', { method: 'POST', headers, body: JSON.stringify({ name, image }) })
+      api('/api/dithered', { method: 'POST', headers, body: JSON.stringify({ name, image, orientation: displayNow().orientation }) })
         .then((r) => r.json())
         .then((d) => {
           if (d.error) throw new Error(d.error);
           if (name === savedName) $('status').textContent = [`saved as ${d.saved}`, usageNote].filter(Boolean).join(' · ');
         })
-        .catch((e) => { $('status').textContent = `${SIZE}x${SIZE} copy not saved: ${e.message}`; });
+        .catch((e) => { $('status').textContent = `${canvas.width}x${canvas.height} copy not saved: ${e.message}`; });
     }
 
     // Always packed from Spectra 6, whatever the palette picklist shows: a frame
     // from any other palette would come out wrong on the panel. The dither
-    // setting is kept.
+    // setting is kept. The server takes the panel from the frame's length, and
+    // sends it only to the partner's displays of that panel.
     async function sendToPartner() {
       if (!source || !partner) return;
       const name = savedName;
       const image = reduce(PALETTES[SPECTRA_6], $('dither').checked);
-      const body = { frame: base64(packFrame(image)) };
+      // The frame is the panel's own raster, so a portrait image is turned to it; the server gets the panel and orientation to route by.
+      const { panel, orientation } = displayNow();
+      const body = { frame: base64(packFrame(toPanel(image, orientation), PANELS[panel])), panel, orientation };
       if (name) {
         body.name = name;
       } else {
         // Converted in the browser, so the server needs the picture too.
         const scratch = document.createElement('canvas');
-        scratch.width = scratch.height = SIZE;
+        scratch.width = image.width;
+        scratch.height = image.height;
         scratch.getContext('2d').putImageData(image, 0, 0);
         body.image = scratch.toDataURL('image/png').split(',')[1];
       }
@@ -231,7 +256,10 @@
 
     // Scales an image onto the panel's pixels and renders it.
     function show(img, name) {
-      source = scale(ctx, img);
+      original = img;
+      source = scale(ctx, img, viewNow());
+      // The preview keeps the panel's shape, so 800x480 is not drawn square.
+      canvas.style.aspectRatio = `${source.width} / ${source.height}`;
       savedName = name;
       render();
     }
@@ -263,12 +291,14 @@
       const style = STYLES[$('style').value] ? $('style').value : Object.keys(STYLES)[0];
       const subject = prompt.replace(/[.!\s]+$/, '');
       const colors = inks().join(', ').replace(/, ([^,]+)$/, ', and $1');
+      const { width, height } = viewNow();
+      const shape = width === height ? '' : width > height ? ' Wide landscape composition.' : ' Tall portrait composition.';
       // Every style ends with the same rules for the panel.
-      prompt = `${STYLES[style].replace('[SUBJECT]', () => subject)}\n\nOptimized for a ${SIZE}x${SIZE} pixel color e-ink display. Use only ${colors}. Flat solid fills, bold simple shapes, thick outlines, high contrast, no gradients, no shadows, no textures, no fine detail, no text. Keep one main subject large and clear, with a simple uncluttered background and strong negative space. The image must remain recognizable after downscaling to ${SIZE}x${SIZE}.`;
+      prompt = `${STYLES[style].replace('[SUBJECT]', () => subject)}\n\nOptimized for a ${width}x${height} pixel color e-ink display.${shape} Use only ${colors}. Flat solid fills, bold simple shapes, thick outlines, high contrast, no gradients, no shadows, no textures, no fine detail, no text. Keep one main subject large and clear, with a simple uncluttered background and strong negative space. The image must remain recognizable after downscaling to ${width}x${height}.`;
       $('go').disabled = true;
       $('status').textContent = 'generating… this can take a minute';
       try {
-        const res = await api('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed, style, model: $('model').value || undefined }) });
+        const res = await api('/api/generate', { method: 'POST', headers, body: JSON.stringify({ prompt, subject: typed, style, model: $('model').value || undefined, panel: displayNow().panel, orientation: displayNow().orientation }) });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const img = await load('data:image/png;base64,' + data.image);
@@ -330,6 +360,11 @@
     $('style').addEventListener('change', () => {
       try { localStorage.setItem('style', $('style').value); } catch {}
     });
+    $('display').addEventListener('change', () => {
+      try { localStorage.setItem('display', $('display').value); } catch {}
+      // The picture on screen was scaled for the old shape; scale the original again.
+      if (original) show(original, savedName);
+    });
     $('palette').addEventListener('change', render);
     $('dither').addEventListener('change', render);
 
@@ -341,7 +376,7 @@
         showDisplays(d.displays || []);
         if (partner) $('send').textContent = `Send to ${partner.name}`;
         $('send').hidden = !(partner && source);
-        $('info').textContent = d.ready ? `${SIZE}×${SIZE} colored e-ink images` : 'OPENAI_API_KEY is not set on the server';
+        $('info').textContent = d.ready ? 'colored e-ink images for the 1.54″ and 7.3″ displays' : 'OPENAI_API_KEY is not set on the server';
         for (const model of d.models) $('model').add(new Option(model, model));
         // Start on the last model picked in this browser, else the server's default.
         let remembered = null;

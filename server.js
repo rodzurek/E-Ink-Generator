@@ -1,5 +1,6 @@
 // E-ink image generator: proxies prompts to the OpenAI image API so the key
-// stays on the server. The page does the 240x240 downscale and palette dither.
+// stays on the server. The page does the downscale and palette dither for the
+// panel it is generating for (see PANELS in public/panel.js).
 // Node's standard library only, so the install needs no setup commands at all.
 
 import http from 'node:http';
@@ -8,6 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AccessUnavailable, createVerifier, identify, loadConfig, parseConfig } from './access.js';
+import { DEFAULT_ORIENTATION, DEFAULT_PANEL, ORIENTATIONS, PANELS, frameBytes, viewOf } from './public/panel.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, 'public');
@@ -26,23 +28,19 @@ const MODELS = [
 ];
 const MAX_BODY = 16 * 1024;
 const MAX_PROMPT = 4000;
-// A dithered 240x240 PNG is tens of kilobytes; base64 and JSON add a third.
-const MAX_DITHERED_BODY = 512 * 1024;
+// A dithered PNG is tens of kilobytes at 240x240 and a few hundred at 800x480;
+// base64 and JSON add a third.
+const MAX_DITHERED_BODY = 1024 * 1024;
 // What saveImage names a generation: an ISO timestamp with - for : and . plus six hex digits.
 const STAMP = String.raw`\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{6}`;
 const SAVED_NAME = new RegExp(`^${STAMP}$`);
-// The only files /api/images hands out: a generation's original or its 240x240 copy.
-const IMAGE_PATH = new RegExp(`^/api/images/(${STAMP}(?:-240)?\\.png)$`);
+// The only files /api/images hands out: a generation's original or one of its dithered copies.
+const COPY_WIDTHS = [...new Set(Object.keys(PANELS).flatMap((panel) => ORIENTATIONS.map((o) => viewOf(panel, o).width)))].join('|');
+const IMAGE_PATH = new RegExp(`^/api/images/(${STAMP}(?:-(?:${COPY_WIDTHS})(?:-portrait)?)?\\.png)$`);
 const HISTORY_LIMIT = 50;
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-// The panel's own frame: 240x240 pixels at 4 bits, two per byte.
-const PANEL_SIZE = 240;
-const FRAME_BYTES = (PANEL_SIZE * PANEL_SIZE) / 2;
-// The six Spectra 6 ink codes (see packFrame in public/panel.js); anything
-// else in a frame means it was packed from the wrong palette.
-const INK_CODES = new Set([0x0, 0x1, 0x2, 0x3, 0x5, 0x6]);
-// A base64 frame plus, for a converted image, its base64 240x240 PNG.
-const MAX_SEND_BODY = 640 * 1024;
+// A base64 frame plus, for a converted image, its base64 PNG.
+const MAX_SEND_BODY = 1024 * 1024;
 // Image generation is slow; give up before a proxy in front of us does.
 const UPSTREAM_TIMEOUT_MS = 180_000;
 
@@ -94,6 +92,37 @@ function readJson(req, limit = MAX_BODY) {
 
 function newStamp() {
   return `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+// Portrait copies and frames get -portrait in their names; landscape ones keep
+// the names they had before orientations existed.
+function orientationSuffix(orientation) {
+  return orientation === 'portrait' ? '-portrait' : '';
+}
+
+// A generation's dithered copy for one panel and orientation: <stamp>-<width>.png.
+function ditheredName(name, panel, orientation) {
+  return `${name}-${viewOf(panel, orientation).width}${orientationSuffix(orientation)}.png`;
+}
+
+// A generation's frame for one panel and orientation: <stamp>-<width>.bin. One
+// name can be sent to displays of both panels and orientations, and each frame differs.
+function frameName(name, panel, orientation) {
+  return `${name}-${PANELS[panel].width}${orientationSuffix(orientation)}.bin`;
+}
+
+// A PNG's width and height from its IHDR chunk, right after the 8-byte signature, or null.
+function pngSize(png) {
+  if (png.length < 24) return null;
+  return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+}
+
+function sameSize(size, view) {
+  return Boolean(size) && size.width === view.width && size.height === view.height;
+}
+
+function viewList(orientation) {
+  return Object.keys(PANELS).map((panel) => `${viewOf(panel, orientation).width}x${viewOf(panel, orientation).height}`).join(' or ');
 }
 
 // Runs fn after every earlier fn for the same key, so a send and an
@@ -164,6 +193,10 @@ async function listGenerations(res, { imagesDir }) {
     try {
       meta = JSON.parse(await fs.promises.readFile(path.join(imagesDir, `${name}.json`), 'utf8'));
     } catch {}
+    // Generations from before panels existed were made for the 1.54inch one, landscape.
+    const panel = Object.hasOwn(PANELS, meta.panel) ? meta.panel : DEFAULT_PANEL;
+    const orientation = ORIENTATIONS.includes(meta.orientation) ? meta.orientation : DEFAULT_ORIENTATION;
+    const copy = ditheredName(name, panel, orientation);
     return {
       name,
       created: meta.created ?? null,
@@ -172,15 +205,19 @@ async function listGenerations(res, { imagesDir }) {
       prompt: meta.prompt ?? '',
       model: meta.model ?? '',
       usage: meta.usage ?? null,
-      dithered: have.has(`${name}-240.png`),
+      panel,
+      orientation,
+      view: viewOf(panel, orientation),
+      copy: have.has(copy) ? copy : null,
     };
   }));
   return send(res, 200, { generations });
 }
 
-// The page dithers, so it sends the 240x240 result back to sit next to the
-// original as <stamp>-240.png. The name must be one saveImage produced and
-// still be on disk, so this can only add a file beside an existing generation.
+// The page dithers, so it sends the result back to sit next to the original as
+// <stamp>-<width>.png, for the panel its size matches. The name must be one
+// saveImage produced and still be on disk, so this can only add a file beside
+// an existing generation.
 async function saveDithered(req, res, { imagesDir }) {
   if (!imagesDir) return send(res, 404, { error: 'image storage is off' });
 
@@ -194,22 +231,28 @@ async function saveDithered(req, res, { imagesDir }) {
   if (!SAVED_NAME.test(name)) return send(res, 400, { error: 'name is not a stored image' });
   const png = Buffer.from(typeof body.image === 'string' ? body.image : '', 'base64');
   if (!png.subarray(0, 8).equals(PNG_MAGIC)) return send(res, 400, { error: 'image must be a base64 PNG' });
+  const orientation = body.orientation === undefined ? DEFAULT_ORIENTATION : body.orientation;
+  if (!ORIENTATIONS.includes(orientation)) return send(res, 400, { error: 'orientation must be landscape or portrait' });
+  const size = pngSize(png);
+  const panel = Object.keys(PANELS).find((id) => sameSize(size, viewOf(id, orientation)));
+  if (!panel) return send(res, 400, { error: `image must be ${viewList(orientation)}` });
 
   try {
     await fs.promises.access(path.join(imagesDir, `${name}.png`));
   } catch {
     return send(res, 404, { error: 'name is not a stored image' });
   }
+  const copy = ditheredName(name, panel, orientation);
   try {
-    await fs.promises.writeFile(path.join(imagesDir, `${name}-240.png`), png);
-    return send(res, 200, { saved: `${name}-240.png` });
+    await fs.promises.writeFile(path.join(imagesDir, copy), png);
+    return send(res, 200, { saved: copy });
   } catch (e) {
     console.error(`could not save image to ${imagesDir}: ${e.message}`);
     return send(res, 500, { error: 'could not write the image' });
   }
 }
 
-// Deletes a stored generation: its original, its 240x240 copy, its .json and
+// Deletes a stored generation: its original, its dithered copies, its .json and
 // its frame. A frame that is still current in a display's inbox is kept, so
 // that display can still fetch it; a newer send replaces it there.
 async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
@@ -239,7 +282,10 @@ async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
     }
   }
 
-  const files = [`${name}.png`, `${name}-240.png`, `${name}.json`, ...(showing ? [] : [`${name}.bin`])];
+  const copies = Object.keys(PANELS).flatMap((panel) => ORIENTATIONS.map((o) => ditheredName(name, panel, o)));
+  // Frames stored before panels had their own names are plain <stamp>.bin.
+  const frames = Object.keys(PANELS).flatMap((panel) => ORIENTATIONS.map((o) => frameName(name, panel, o)));
+  const files = [`${name}.png`, ...copies, `${name}.json`, ...(showing ? [] : [`${name}.bin`, ...frames])];
   let removed = 0;
   try {
     for (const file of files) {
@@ -260,16 +306,17 @@ async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
 
 // Sends a packed frame to the partner's display. The frame comes with either
 // the name of a stored generation or, for an image converted in the browser
-// (which the server never saw), its 240x240 PNG, which then gets its own
-// stored entry. The frame is stored as <stamp>.bin and becomes the current
-// frame in each of the partner's device inboxes; a newer send replaces it.
+// (which the server never saw), its PNG, which then gets its own stored entry.
+// The frame's length says which panel it is for, so it goes only to the
+// partner's displays of that panel. It is stored as <stamp>.bin and becomes
+// the current frame in each of those inboxes; a newer send replaces it.
 async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   if (!user) return send(res, 403, { error: 'sending needs a signed-in user' });
   if (!imagesDir || !inboxDir) return send(res, 404, { error: 'image storage is off' });
   const partner = user.partner ? config.users.get(user.partner) : null;
   if (!partner) return send(res, 409, { error: 'you have no partner set in config.json' });
-  const devices = [...config.devices.values()].filter((d) => d.owner === partner.email);
-  if (!devices.length) return send(res, 409, { error: `${partner.name} has no display set in config.json` });
+  const owned = [...config.devices.values()].filter((d) => d.owner === partner.email);
+  if (!owned.length) return send(res, 409, { error: `${partner.name} has no display set in config.json` });
 
   let body;
   try {
@@ -278,10 +325,18 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
     return send(res, 400, { error: e.message });
   }
   const frame = Buffer.from(typeof body.frame === 'string' ? body.frame : '', 'base64');
-  if (frame.length !== FRAME_BYTES) return send(res, 400, { error: `frame must be ${FRAME_BYTES} bytes` });
-  if (!frame.every((b) => INK_CODES.has(b >> 4) && INK_CODES.has(b & 0xf))) {
+  const panel = Object.keys(PANELS).find((id) => frameBytes(PANELS[id]) === frame.length);
+  if (!panel) {
+    return send(res, 400, { error: `frame must be ${Object.values(PANELS).map(frameBytes).join(' or ')} bytes` });
+  }
+  const inks = new Set(Object.values(PANELS[panel].codes));
+  if (!frame.every((b) => inks.has(b >> 4) && inks.has(b & 0xf))) {
     return send(res, 400, { error: 'frame holds a color the panel does not have' });
   }
+  const orientation = body.orientation === undefined ? DEFAULT_ORIENTATION : body.orientation;
+  if (!ORIENTATIONS.includes(orientation)) return send(res, 400, { error: 'orientation must be landscape or portrait' });
+  const devices = owned.filter((d) => d.panel === panel && d.orientation === orientation);
+  if (!devices.length) return send(res, 409, { error: `${partner.name} has no ${PANELS[panel].label} ${orientation} display set in config.json` });
   const hasName = body.name !== undefined;
   const hasImage = body.image !== undefined;
   if (hasName === hasImage) return send(res, 400, { error: 'send either the name of a stored image or an image' });
@@ -298,15 +353,13 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   } else {
     const png = Buffer.from(typeof body.image === 'string' ? body.image : '', 'base64');
     if (!png.subarray(0, 8).equals(PNG_MAGIC)) return send(res, 400, { error: 'image must be a base64 PNG' });
-    // Width and height are the first fields of the IHDR chunk, right after the signature.
-    if (png.length < 24 || png.readUInt32BE(16) !== PANEL_SIZE || png.readUInt32BE(20) !== PANEL_SIZE) {
-      return send(res, 400, { error: `image must be ${PANEL_SIZE}x${PANEL_SIZE}` });
-    }
+    const view = viewOf(panel, orientation);
+    if (!sameSize(pngSize(png), view)) return send(res, 400, { error: `image must be ${view.width}x${view.height}` });
     name = newStamp();
     try {
       await fs.promises.mkdir(imagesDir, { recursive: true });
-      await fs.promises.writeFile(path.join(imagesDir, `${name}-240.png`), png);
-      const meta = { created: new Date().toISOString(), createdBy: user.email, source: 'upload' };
+      await fs.promises.writeFile(path.join(imagesDir, ditheredName(name, panel, orientation)), png);
+      const meta = { created: new Date().toISOString(), createdBy: user.email, source: 'upload', panel, orientation };
       await fs.promises.writeFile(path.join(imagesDir, `${name}.json`), JSON.stringify(meta, null, 2) + '\n');
     } catch (e) {
       console.error(`could not save image to ${imagesDir}: ${e.message}`);
@@ -316,7 +369,7 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
 
   const entry = { frame: name, sentBy: user.email, sentAt: new Date().toISOString(), deliveredAt: null };
   try {
-    await fs.promises.writeFile(path.join(imagesDir, `${name}.bin`), frame);
+    await fs.promises.writeFile(path.join(imagesDir, frameName(name, panel, orientation)), frame);
     await fs.promises.mkdir(inboxDir, { recursive: true });
     for (const device of devices) {
       const file = path.join(inboxDir, `${device.id}.json`);
@@ -326,7 +379,7 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
     console.error(`could not send ${name}: ${e.message}`);
     return send(res, 500, { error: 'could not store the frame' });
   }
-  return send(res, 200, { sent: name, to: partner.name, devices: devices.map((d) => d.id) });
+  return send(res, 200, { sent: name, to: partner.name, panel, orientation, devices: devices.map((d) => d.id) });
 }
 
 // The display's current frame, unless it already has it (?after=<frame id>)
@@ -341,7 +394,7 @@ async function deviceFrame(res, url, { imagesDir, inboxDir, device }) {
   if (!SAVED_NAME.test(String(entry.frame))) return send(res, 500, { error: 'inbox is damaged' });
   let frame;
   try {
-    frame = await fs.promises.readFile(path.join(imagesDir, `${entry.frame}.bin`));
+    frame = await fs.promises.readFile(path.join(imagesDir, frameName(entry.frame, device.panel, device.orientation)));
   } catch (e) {
     console.error(`frame ${entry.frame} for ${device.id} is missing: ${e.message}`);
     return send(res, 404, { error: 'the current frame is missing' });
@@ -411,14 +464,19 @@ async function generate(req, res, { apiKey, models, model: defaultModel, quality
   if (prompt.length > MAX_PROMPT) return send(res, 400, { error: `prompt is longer than ${MAX_PROMPT} characters` });
   const model = body.model === undefined ? defaultModel : body.model;
   if (!models.includes(model)) return send(res, 400, { error: `model must be one of: ${models.join(', ')}` });
+  const panel = body.panel === undefined ? DEFAULT_PANEL : body.panel;
+  if (!Object.hasOwn(PANELS, panel)) return send(res, 400, { error: `panel must be one of: ${Object.keys(PANELS).join(', ')}` });
+  const orientation = body.orientation === undefined ? DEFAULT_ORIENTATION : body.orientation;
+  if (!ORIENTATIONS.includes(orientation)) return send(res, 400, { error: 'orientation must be landscape or portrait' });
 
   try {
-    // The API has no 240x240 size; the smallest square is requested and the
-    // page scales it down.
+    // The API has no panel's exact size; the nearest one it offers is asked
+    // for and the page crops and scales it down.
+    const size = orientation === 'portrait' ? PANELS[panel].apiPortrait : PANELS[panel].api;
     const upstream = await fetchImpl(OPENAI_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, prompt, size: '1024x1024', quality, n: 1 }),
+      body: JSON.stringify({ model, prompt, size, quality, n: 1 }),
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
     const data = await upstream.json().catch(() => ({}));
@@ -432,7 +490,7 @@ async function generate(req, res, { apiKey, models, model: defaultModel, quality
     const usage = data.usage && typeof data.usage === 'object' ? data.usage : null;
     const style = typeof body.style === 'string' ? body.style.trim().slice(0, 100) : '';
     const createdBy = user?.email ?? null;
-    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), createdBy, subject, style, prompt, model, quality, usage });
+    const saved = await saveImage(imagesDir, image, { created: new Date().toISOString(), createdBy, subject, style, prompt, model, quality, usage, panel, orientation });
     return send(res, 200, { image, saved, usage });
   } catch (e) {
     return send(res, 502, { error: e.name === 'TimeoutError' ? 'OpenAI took too long to answer' : e.message });
@@ -534,7 +592,7 @@ export function createApp({
       const owners = [user, partner].filter(Boolean);
       const displays = await Promise.all([...config.devices.values()]
         .filter((d) => owners.some((u) => u.email === d.owner))
-        .map(async (d) => ({ id: d.id, owner: config.users.get(d.owner)?.name ?? d.owner, lastSeen: await lastSeen(inboxDir, d) })));
+        .map(async (d) => ({ id: d.id, owner: config.users.get(d.owner)?.name ?? d.owner, panel: d.panel, orientation: d.orientation, lastSeen: await lastSeen(inboxDir, d) })));
       return send(res, 200, {
         name: process.env.APP_NAME || 'e-ink-generator', node: process.version, model, models, ready: Boolean(apiKey),
         user: person(user), partner: person(partner), displays,
@@ -548,7 +606,7 @@ export function createApp({
       return send(res, 200, {
         name: 'E-Ink Generator',
         short_name: 'E-Ink',
-        description: 'Generate and convert images for a 240x240 colored e-ink display',
+        description: 'Generate and convert images for colored e-ink displays',
         start_url: `/${carry}`,
         scope: '/',
         display: 'standalone',

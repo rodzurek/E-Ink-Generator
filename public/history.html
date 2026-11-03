@@ -16,8 +16,8 @@
     .muted { color: var(--muted); }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 1rem; margin-top: 1.5rem; }
     .card { background: var(--card); border-radius: 12px; padding: 0.75rem; overflow-wrap: anywhere; }
-    /* 240 real pixels; kept crisp when the card is wider. */
-    .card img { display: block; width: 100%; aspect-ratio: 1; image-rendering: pixelated; border: 1px solid var(--line); border-radius: 6px; background: #fff; box-sizing: border-box; }
+    /* The panel's real pixels; kept crisp when the card is wider. The shape is set from the panel. */
+    .card img { display: block; width: 100%; image-rendering: pixelated; border: 1px solid var(--line); border-radius: 6px; background: #fff; box-sizing: border-box; }
     .card h2 { font-size: 1rem; margin: 0.5rem 0 0; }
     .card p { margin: 0.15rem 0 0; font-size: 0.875rem; }
     details { margin-top: 0.35rem; font-size: 0.8125rem; }
@@ -41,7 +41,7 @@
     const token = new URLSearchParams(location.search).get('token');
     const carry = token ? '?token=' + encodeURIComponent(token) : '';
     // Imported here rather than with a static import, so the token rides in its URL.
-    const { SIZE, PANEL_INKS, reduce, scale, packFrame, base64 } = await import('/panel.js' + carry);
+    const { PANELS, DEFAULT_PANEL, DEFAULT_ORIENTATION, PANEL_INKS, viewOf, toPanel, reduce, scale, packFrame, base64 } = await import('/panel.js' + carry);
     // The partner whose display Send goes to, from /api/info; null when there is none.
     let partner = null;
     $('back').href += carry;
@@ -82,22 +82,23 @@
       });
     }
 
-    // Packed again from the 1024x1024 original, reduced to Spectra 6 and
-    // dithered as the generator does by default: the stored 240x240 copy may
-    // show another palette, which would come out wrong on the panel.
+    // Packed again from the original, reduced to Spectra 6 and dithered as the
+    // generator does by default: the stored copy may show another palette,
+    // which would come out wrong on the panel.
     async function sendToPartner(g, button, status) {
       button.disabled = true;
       status.textContent = `sending to ${partner.name}…`;
       try {
+        const panel = PANELS[g.panel] ?? PANELS[DEFAULT_PANEL];
+        const orientation = g.orientation ?? DEFAULT_ORIENTATION;
         const canvas = document.createElement('canvas');
-        canvas.width = canvas.height = SIZE;
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const source = scale(ctx, await load(`/api/images/${g.name}.png${carry}`));
-        const frame = base64(packFrame(reduce(source, PANEL_INKS, true)));
+        const source = scale(ctx, await load(`/api/images/${g.name}.png${carry}`), viewOf(g.panel ?? DEFAULT_PANEL, orientation));
+        const frame = base64(packFrame(toPanel(reduce(source, PANEL_INKS, true), orientation), panel));
         const res = await api('/api/send' + carry, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ frame, name: g.name }),
+          body: JSON.stringify({ frame, name: g.name, orientation }),
         });
         const d = await res.json();
         if (d.error) throw new Error(d.error);
@@ -109,7 +110,7 @@
       }
     }
 
-    // Asks first: the original, the 240x240 copy and the record go for good.
+    // Asks first: the original, its copies and the record go for good.
     // A frame a display is still showing stays on the server until replaced.
     async function deleteGeneration(g, node, buttons, status) {
       if (!confirm(`Delete "${g.subject || g.name}"? This cannot be undone.`)) return;
@@ -134,15 +135,16 @@
       const node = element('div', '', 'card');
       const original = `/api/images/${g.name}.png${carry}`;
 
-      // The 240x240 copy is what the panel shows; an old generation may only have its original.
+      // The copy for the generation's panel and orientation is what the panel shows; an old generation may only have its original.
       const link = element('a');
       link.href = original;
       link.target = '_blank';
-      link.title = 'Open the 1024x1024 original';
+      link.title = 'Open the original';
       const img = element('img');
       img.loading = 'lazy';
       img.alt = g.subject || 'generated image';
-      img.src = g.dithered ? `/api/images/${g.name}-240.png${carry}` : original;
+      img.style.aspectRatio = `${g.view.width} / ${g.view.height}`;
+      img.src = g.copy ? `/api/images/${g.copy}${carry}` : original;
       link.append(img);
       node.append(link);
 

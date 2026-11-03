@@ -5,6 +5,7 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { DEFAULT_ORIENTATION, DEFAULT_PANEL, ORIENTATIONS, PANELS } from './public/panel.js';
 
 // Cloudflare rotates its signing keys every few weeks and publishes the next
 // one ahead of time, so an hour-old copy is fine.
@@ -54,7 +55,11 @@ export function parseConfig(raw = {}) {
     if (!DEVICE_ID.test(id)) throw new Error(`config: device id "${id}" must be lowercase letters, digits and -`);
     if (!users.has(owner)) throw new Error(`config: device ${id}'s owner ${owner || '(none)'} is not a user`);
     if (devices.has(clientId) || ids.has(id)) throw new Error(`config: device ${id} is listed twice`);
-    devices.set(clientId, { id, clientId, owner });
+    const panel = entry.panel ?? DEFAULT_PANEL;
+    if (!Object.hasOwn(PANELS, panel)) throw new Error(`config: device ${id}'s panel ${panel} is not one of ${Object.keys(PANELS).join(', ')}`);
+    const orientation = entry.orientation ?? DEFAULT_ORIENTATION;
+    if (!ORIENTATIONS.includes(orientation)) throw new Error(`config: device ${id}'s orientation ${orientation} is not landscape or portrait`);
+    devices.set(clientId, { id, clientId, owner, panel, orientation });
     ids.add(id);
   }
   return { users, devices };
