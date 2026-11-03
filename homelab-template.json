@@ -1,6 +1,6 @@
 {
   "name": "e-ink-generator",
-  "description": "Generates 240x240 colored e-ink images with the OpenAI image API",
+  "description": "Generates colored e-ink images (240x240 and 800x480 panels) with the OpenAI image API",
   "kind": "git",
   "repo": "https://github.com/YOU/e-ink-generator.git",
   "setup": [],

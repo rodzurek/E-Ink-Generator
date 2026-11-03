@@ -1,7 +1,7 @@
 # E-Ink Generator
 
-Type a prompt, get a 240x240 image reduced to the colors of a colored e-ink
-panel. Built on the homelab app template: Node 18+, standard library only, so
+Type a prompt, get an image reduced to the colors of a colored e-ink panel: the
+1.54inch 240x240 one or the 7.3inch 800x480 Spectra 6 one. Built on the homelab app template: Node 18+, standard library only, so
 the install needs no setup commands and nothing to build. It runs as a systemd
 **user** unit the agent writes for you, which needs no root and no sudoers line.
 
@@ -21,13 +21,53 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
 
 1. The page posts the prompt to `/api/generate`.
 2. The server calls the OpenAI image API with `OPENAI_API_KEY`, so the key never
-   reaches the browser. The API has no 240x240 size, so it asks for 1024x1024.
-3. The page scales the result to 240x240 on a canvas and maps every pixel to the
-   chosen panel palette, with Floyd–Steinberg dithering unless you turn it off.
-   Changing the palette or the dither re-renders without another API call.
-4. **Download PNG** saves the 240x240 result. It contains only the palette's
+   reaches the browser. The API has no panel's exact size, so it asks for the
+   nearest: 1024x1024 for the 240x240 panel, 1536x1024 for the 800x480 one.
+3. The page crops and scales the result to the panel's size on a canvas and maps
+   every pixel to the chosen panel palette, with Floyd–Steinberg dithering unless
+   you turn it off. Changing the palette or the dither re-renders without another
+   API call.
+4. **Download PNG** saves the result at the panel's size. It contains only the palette's
    pure colors (black `000000`, white `ffffff`, red `ff0000`, yellow `ffff00`,
    blue `0000ff`, green `00ff00`, orange `ff8000`).
+
+## Panels
+
+The **Display** picklist sets the size of everything: what is generated, what
+is converted, what is shown and what is sent. Both panels are e-ink Spectra 6,
+and their definitions are `PANELS` in `public/panel.js`:
+
+| Panel                              | Size    | Frame         | OpenAI size                |
+| ---------------------------------- | ------- | ------------- | -------------------------- |
+| 1.54inch e-Paper Module (E)        | 240x240 | 28,800 bytes  | 1024x1024                  |
+| 7.3inch e-Paper HAT (E), Spectra 6 | 800x480 | 192,000 bytes | 1536x1024 (cropped to 5:3) |
+
+Each display in `config.json` names its panel with `"panel": "7.3"`; without
+one it is the 1.54inch panel. Its `"orientation"` is `landscape` by default, or
+`portrait` for a display mounted upright. The **Orientation** picklist shapes
+what is generated, converted and shown. A portrait image is turned clockwise
+into the panel's raster before packing, so a display mounted upright shows it
+upright; if a picture comes out turned the other way, the turn in `toPanel`
+(`public/panel.js`) has the wrong direction. A frame goes only to the partner's
+displays of its panel and orientation, and the server takes the panel from the
+frame's length, so a frame of the wrong size is refused. The browser remembers the chosen Display, like
+the style.
+
+The 7.3inch ink codes are from Waveshare's `EPD_7in3e` driver header, written
+from memory. They have **not** been checked with a color band test on a wired
+panel the way the 1.54inch codes were. Check them before trusting a frame:
+
+| Ink    | 7.3inch code |
+| ------ | ------------ |
+| black  | `0x0`        |
+| white  | `0x1`        |
+| green  | `0x2`        |
+| blue   | `0x3`        |
+| red    | `0x4`        |
+| yellow | `0x5`        |
+
+The display's own firmware is not in this repo: it has to fetch the 192,000-byte
+frame from `/api/device/frame` and draw it.
 
 ## Styles
 
@@ -57,28 +97,29 @@ reachable and never shows a stale page.
 **Take photo** opens the phone's camera and **Choose image** its photo library
 or files; on a computer both open the file picker, and Ctrl+V anywhere on the
 page pastes an image. Any picture the browser can open works. The page crops it
-to a centered square, scales it to 240x240 and renders it with the same palette
-and dither settings. It costs nothing: OpenAI is not called. The conversion
+to the shape of the Display's panel, scales it to that size and renders it with
+the same palette and dither settings. It costs nothing: OpenAI is not called. The conversion
 happens in the browser and the original file never reaches the server. It is
-stored in `images/` only when it is sent (240x240 copy and frame); otherwise
+stored in `images/` only when it is sent (the copy and the frame); otherwise
 use **Download PNG** to keep the result.
 
 ## Sending to the partner's display
 
 Once an image is on screen, generated or converted, **Send to <partner>**
-appears. It packs the image into the panel's own frame and posts it to
-`/api/send`; the server stores it and makes it the current frame for the
+appears. It packs the image into the frame of the panel picked in **Display**
+and posts it to `/api/send`; the server stores it and makes it the current frame for the
 partner's display, which fetches it from there (the device endpoints).
 
 Both displays are Spectra 6 panels, so the frame is always reduced to the
 Spectra 6 inks, whatever the palette picklist shows; the dither setting is
 kept. The other palettes only change the preview and the download.
 
-The frame is 240x240 pixels at 4 bits, 28,800 bytes: row by row from the top
-left, two pixels per byte, the left pixel in the high nibble. The ink codes
-are those of the 1.54inch e-Paper Module (E), taken from Waveshare's
-`EPD_1in54e` driver demo (github.com/waveshareteam/1.54inch_e-Paper_E) and
-checked with a color band test on the wired panel:
+A frame is the panel's pixels at 4 bits: row by row from the top left, two
+pixels per byte, the left pixel in the high nibble. That is 28,800 bytes for
+the 240x240 panel and 192,000 for the 800x480 one. The 1.54inch ink codes are
+those of the 1.54inch e-Paper Module (E), taken from Waveshare's `EPD_1in54e`
+driver demo (github.com/waveshareteam/1.54inch_e-Paper_E) and checked with a
+color band test on the wired panel; the 7.3inch codes are in **Panels**:
 
 | Ink    | Code  |
 | ------ | ----- |
@@ -89,14 +130,18 @@ checked with a color band test on the wired panel:
 | blue   | `0x5` |
 | green  | `0x6` |
 
-`PANEL_CODES` in `public/panel.js` holds them; the server refuses a frame
-with any other code, or that is not exactly 28,800 bytes.
+The codes are in `PANELS` in `public/panel.js`. The server refuses a frame with
+a code its panel does not have, or whose length is neither 28,800 nor 192,000
+bytes.
 
 `POST /api/send` takes `{ frame, name }` for a stored generation, or
-`{ frame, image }` with the 240x240 PNG for a converted image, which the server
-has never seen. The frame is written as `images/<stamp>.bin`. A converted
-image gets its own entry: `<stamp>-240.png`, `<stamp>.bin` and a `.json` with
-`created`, `createdBy` and `source: "upload"`. Then `inbox/<device>.json`
+`{ frame, image }` with the PNG at the panel's size for a converted image, which
+the server has never seen. The frame is written as `images/<stamp>-<width>.bin`
+(`-240.bin` or `-800.bin`), so one generation can go to both panels. A converted
+image gets its own entry: `<stamp>-<width>.png`, `<stamp>-<width>.bin` and a
+`.json` with `created`, `createdBy`, `source: "upload"`, `panel` and `orientation`.
+`orientation` (default `landscape`) says which of the partner's displays
+it is for. Then `inbox/<device>.json`
 (git-ignored, `INBOX_DIR`) for each of the partner's displays in
 `config.json` holds `frame` (the stamp), `sentBy`, `sentAt` and
 `deliveredAt` (`null` until the display acknowledges). There is no queue: a
@@ -111,7 +156,7 @@ only ever sees its own inbox.
 
 - `GET /api/device/frame?after=<frame id>` answers **204** when nothing was
   sent to the display yet, or when `after` is already the current frame.
-  Otherwise **200** with the raw 28,800-byte frame as
+  Otherwise **200** with the raw frame for the display's panel as
   `application/octet-stream`, a `Content-Length`, and the frame id in
   `X-Frame-Id`. Leave `after` empty on the first call.
 - `POST /api/device/ack?frame=<frame id>` records `deliveredAt` in the
@@ -157,33 +202,37 @@ same timestamped name:
 
 - `.png` — the 1024x1024 original from OpenAI, before scaling and dithering,
   so it can be re-rendered for any palette later
-- `-240.png` — the 240x240 dithered result, the same file **Download PNG**
-  gives. The page sends it back through `/api/dithered` after rendering, and
-  again when the palette or dither setting changes, so it always holds the
-  last render and earlier ones are overwritten.
+- `-240.png` or `-800.png` (`-480-portrait.png` for portrait) — the dithered result at the panel's size, the same
+  file **Download PNG** gives. The page sends it back through `/api/dithered`
+  after rendering, and again when the palette or dither setting changes, so it
+  always holds the last render and earlier ones are overwritten. A generation
+  can have one copy per panel.
 - `.json` — `created`, `createdBy` (the email of the partner who generated
   it, or `null` without Access or a stand-in user), `subject` (what was typed), `style` (the style
-  picked), `prompt` (what was sent),
-  `model`, `quality`, and `usage`: the token counts OpenAI reported for that
+  picked), `prompt` (what was sent), `panel` (`1.54` or `7.3`, the Display it
+  was made for; `1.54` for generations from before panels), `orientation`
+  (`landscape` or `portrait`; `landscape` for older ones), `model`, `quality`,
+  and `usage`: the token counts OpenAI reported for that
   generation (`total_tokens`, `input_tokens`, `output_tokens`), or `null` if
   the model reported none. The page shows the same counts after generating.
 
 **History** (`/history.html`, linked from the top of the generator) shows the
-last 50 generations, newest first: the 240x240 image, what was typed, the
+last 50 generations, newest first: the image at its panel's size, what was typed, the
 style, model, date and tokens, with the full prompt behind **Prompt sent**.
 Clicking an image opens its 1024x1024 original. It reads `images/` through
 `/api/generations` and `/api/images/<name>.png`; images converted from a photo
 or upload are not listed: they are stored only when sent, without an original.
 
 With a partner set (see Sending to the partner's display), each card has **Send to <partner>**. It packs
-the frame again from the 1024x1024 original, reduced to Spectra 6 and
-dithered, the generator's defaults, so a stored 240x240 copy rendered in
-another palette still comes out right on the panel. It replaces whatever the
+the frame again from the original, reduced to Spectra 6 and dithered, the
+generator's defaults, so a stored copy rendered in another palette still comes
+out right on the panel. It replaces whatever the
 partner's display shows, like Send on the generator.
 
 **Delete** on a card asks first, then removes that generation for good:
-`POST /api/delete` with `{ name }` deletes `<name>.png`, `<name>-240.png`,
-`<name>.json` and `<name>.bin`. A frame that is still the current one in a
+`POST /api/delete` with `{ name }` deletes `<name>.png`, its `-240.png` and
+`-800.png` copies, `<name>.json`, and its frames (`-240.bin`, `-800.bin` and any
+older `<name>.bin`). A frame that is still the current one in a
 display's inbox is kept, so that display can still fetch it; the answer says
 so with `frameKept: true`. Either partner can delete any generation.
 
@@ -210,7 +259,7 @@ The server is the only place the key lives; the page never sees it.
    - **Dashboard install:** add `OPENAI_API_KEY=sk-...` to the **Environment**
      field (see **Install it from the dashboard**), then restart the app.
 
-To check it: the page's header line reads "240×240 colored e-ink images" when
+To check it: the page's header line reads "colored e-ink images for the 1.54″ and 7.3″ displays" when
 the key is set and "OPENAI_API_KEY is not set on the server" when it is not.
 To rotate it, create a new key, swap it in, restart, then revoke the old one.
 Never commit it: `.env` is ignored, `.env.example` must only ever hold
@@ -321,7 +370,8 @@ fetched the app answers 503 rather than letting anyone in.
 `config.json` is git-ignored, so copy it to the node by hand next to
 `server.js`. Each user has an `email`, a `name` and their `partner`'s email;
 each device has an `id` (lowercase letters, digits and `-`), the `clientId` of
-its service token and its `owner`'s email. The Client ID is an identifier, not
+its service token, its `owner`'s email, its `panel` (`1.54` by default, or
+`7.3`) and its `orientation` (`landscape` by default, or `portrait`). The Client ID is an identifier, not
 a secret; the Client Secret lives only on the device and is never written into
 the app. A mistake in the file stops the server at start-up with the reason.
 
