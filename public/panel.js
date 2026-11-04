@@ -14,7 +14,7 @@ export const PANEL_INKS = ['black', 'white', 'red', 'yellow', 'blue', 'green'];
 
 // The panels a display can have. The id is what config.json's device `panel`
 // and a generation's `panel` name. `api` is the size asked of OpenAI, the
-// nearest one it offers; the page center-crops the result to width x height.
+// nearest one it offers; the page fits the result into width x height.
 // `width` x `height` is the panel's own raster, landscape; a display mounted
 // upright in portrait shows it turned, see toPanel.
 export const PANELS = {
@@ -111,22 +111,24 @@ export function reduce(source, names, dither) {
 }
 
 // Scales an image onto a panel's pixels in `ctx`, sets the canvas to the
-// panel's size and returns them. The image is center-cropped to the panel's
-// shape, and transparency becomes white like the paper.
+// panel's size and returns them. The whole image is fitted in and centered,
+// nothing cut off: where its shape differs from the panel's, the rest is
+// black bars (a 1536x1024 generation on the 800x480 panel gets 40px each side).
+// Transparency inside the image becomes white like the paper.
 export function scale(ctx, img, { width, height }) {
   ctx.canvas.width = width;
   ctx.canvas.height = height;
-  const shape = width / height;
-  let cropWidth = img.naturalWidth;
-  let cropHeight = img.naturalHeight;
-  if (cropWidth / cropHeight > shape) cropWidth = cropHeight * shape;
-  else cropHeight = cropWidth / shape;
-  const left = (img.naturalWidth - cropWidth) / 2;
-  const top = (img.naturalHeight - cropHeight) / 2;
-  ctx.fillStyle = '#fff';
+  const fit = Math.min(width / img.naturalWidth, height / img.naturalHeight);
+  const drawWidth = Math.round(img.naturalWidth * fit);
+  const drawHeight = Math.round(img.naturalHeight * fit);
+  const left = Math.floor((width - drawWidth) / 2);
+  const top = Math.floor((height - drawHeight) / 2);
+  ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(left, top, drawWidth, drawHeight);
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, left, top, cropWidth, cropHeight, 0, 0, width, height);
+  ctx.drawImage(img, left, top, drawWidth, drawHeight);
   return ctx.getImageData(0, 0, width, height);
 }
 

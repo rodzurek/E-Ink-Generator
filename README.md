@@ -23,7 +23,8 @@ homelab-template.json  a dashboard template; copy into hub/catalog/ to prefill t
 2. The server calls the OpenAI image API with `OPENAI_API_KEY`, so the key never
    reaches the browser. The API has no panel's exact size, so it asks for the
    nearest: 1024x1024 for the 240x240 panel, 1536x1024 for the 800x480 one.
-3. The page crops and scales the result to the panel's size on a canvas and maps
+3. The page fits the whole result into the panel's size on a canvas, with black
+   bars where the shapes differ, and maps
    every pixel to the chosen panel palette, with Floyd–Steinberg dithering unless
    you turn it off. Changing the palette or the dither re-renders without another
    API call.
@@ -40,7 +41,7 @@ and their definitions are `PANELS` in `public/panel.js`:
 | Panel                              | Size    | Frame         | OpenAI size                |
 | ---------------------------------- | ------- | ------------- | -------------------------- |
 | 1.54inch e-Paper Module (E)        | 240x240 | 28,800 bytes  | 1024x1024                  |
-| 7.3inch e-Paper HAT (E), Spectra 6 | 800x480 | 192,000 bytes | 1536x1024 (cropped to 5:3) |
+| 7.3inch e-Paper HAT (E), Spectra 6 | 800x480 | 192,000 bytes | 1536x1024 (fitted, black bars) |
 
 Each display in `config.json` names its panel with `"panel": "7.3"`; without
 one it is the 1.54inch panel. Its `"orientation"` is `landscape` by default, or
@@ -97,8 +98,8 @@ reachable and never shows a stale page.
 
 **Take photo** opens the phone's camera and **Choose image** its photo library
 or files; on a computer both open the file picker, and Ctrl+V anywhere on the
-page pastes an image. Any picture the browser can open works. The page crops it
-to the shape of the Display's panel, scales it to that size and renders it with
+page pastes an image. Any picture the browser can open works. The page fits all
+of it into the Display's panel, with black bars where the shapes differ and renders it with
 the same palette and dither settings. It costs nothing: OpenAI is not called. The conversion
 happens in the browser and the original file never reaches the server. It is
 stored in `images/` only when it is sent (the copy and the frame); otherwise

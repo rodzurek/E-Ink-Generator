@@ -507,7 +507,7 @@ async function generate(req, res, { apiKey, models, model: defaultModel, quality
 
   try {
     // The API has no panel's exact size; the nearest one it offers is asked
-    // for and the page crops and scales it down.
+    // for and the page fits it into the panel, with black bars.
     const size = orientation === 'portrait' ? PANELS[panel].apiPortrait : PANELS[panel].api;
     const upstream = await fetchImpl(OPENAI_URL, {
       method: 'POST',
