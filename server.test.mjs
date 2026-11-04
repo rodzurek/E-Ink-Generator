@@ -705,19 +705,22 @@ test('panels: each panel keeps its own dithered copy, named by its width', async
   }
 });
 
-test('panels: a frame goes only to the partner\'s displays of its panel', async () => {
+test('panels: a frame goes to every partner display, in the inbox of its panel', async () => {
   await withSendServer({ config: panelConfig }, async (base, { inboxDir }) => {
     const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
 
     const large = await (await sendImage(base, { name: saved, frame: whiteLarge.toString('base64') })).json();
-    assert.deepEqual(large, { sent: saved, to: 'Ampy', panel: '7.3', orientation: 'landscape', devices: ['ampy-large'] });
+    assert.deepEqual(large, { sent: saved, to: 'Ampy', panel: '7.3', orientation: 'landscape', devices: ['ampy-small', 'ampy-large'] });
+    assert.deepEqual((await fs.readdir(inboxDir)).sort(), ['ampy-large-7in3.json', 'ampy-small-7in3.json']);
     const small = await (await sendImage(base, { name: saved, frame: whiteFrame.toString('base64') })).json();
-    assert.deepEqual(small, { sent: saved, to: 'Ampy', panel: '1.54', orientation: 'landscape', devices: ['ampy-small'] });
-    assert.deepEqual((await fs.readdir(inboxDir)).sort(), ['ampy-large.json', 'ampy-small.json']);
+    assert.deepEqual(small.devices, ['ampy-small', 'ampy-large']);
+    assert.deepEqual((await fs.readdir(inboxDir)).sort(), ['ampy-large-7in3.json', 'ampy-large.json', 'ampy-small-7in3.json', 'ampy-small.json']);
   });
 });
 
-test('panels: each display fetches the frame of its own size, even when both were sent one generation', async () => {
+// The 1.54 board calls /api/device/frame and the 7.3 board /api/device/frame-7in3,
+// both with one display's token, as when one service token is on both boards.
+async function withBothSent(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
   const imagesDir = path.join(dir, 'images');
   const inboxDir = path.join(dir, 'inbox');
@@ -729,17 +732,53 @@ test('panels: each display fetches the frame of its own size, even when both wer
       await sendImage(base, { name: saved, frame: whiteLarge.toString('base64') });
       await sendImage(base, { name: saved, frame: whiteFrame.toString('base64') });
     });
-    for (const [device, bytes] of [['ampy-large', 192_000], ['ampy-small', 28_800]]) {
-      await withServer({ imagesDir, inboxDir, config: panelConfig, devDevice: device }, async (base) => {
-        const res = await fetch(`${base}/api/device/frame`);
-        assert.equal(res.status, 200, device);
-        assert.equal(res.headers.get('content-length'), String(bytes), device);
-        assert.equal(res.headers.get('x-frame-id'), saved, device);
-      });
-    }
+    await withServer({ imagesDir, inboxDir, config: panelConfig, devDevice: 'ampy-small' }, (base) => fn(base, saved, inboxDir));
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+}
+
+test('panels: /api/device/frame hands out only 240x240 frames, /api/device/frame-7in3 only 800x480', async () => {
+  await withBothSent(async (base, saved) => {
+    const small = await fetch(`${base}/api/device/frame?after=`);
+    assert.equal(small.status, 200);
+    assert.equal(small.headers.get('content-length'), '28800');
+    assert.equal(small.headers.get('x-frame-id'), saved);
+    assert.deepEqual(Buffer.from(await small.arrayBuffer()), whiteFrame);
+
+    const large = await fetch(`${base}/api/device/frame-7in3?after=`);
+    assert.equal(large.status, 200);
+    assert.equal(large.headers.get('content-length'), '192000');
+    assert.equal(large.headers.get('x-frame-id'), `${saved}-7in3`);
+    assert.deepEqual(Buffer.from(await large.arrayBuffer()), whiteLarge);
+
+    assert.equal((await fetch(`${base}/api/device/frame?after=${saved}`)).status, 204);
+    assert.equal((await fetch(`${base}/api/device/frame-7in3?after=${saved}-7in3`)).status, 204);
+    assert.equal((await fetch(`${base}/api/device/frame-7in3`, { method: 'POST' })).status, 405);
+  });
+});
+
+test('panels: with nothing of its size sent, a route answers 204', async () => {
+  await withSendServer({ config: panelConfig, devDevice: 'ampy-small' }, async (base) => {
+    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+    await sendImage(base, { name: saved, frame: whiteLarge.toString('base64') });
+    assert.equal((await fetch(`${base}/api/device/frame`)).status, 204);
+    assert.equal((await fetch(`${base}/api/device/frame-7in3`)).status, 200);
+  });
+});
+
+test('panels: each board acknowledges its own frame, the id says which', async () => {
+  await withBothSent(async (base, saved, inboxDir) => {
+    const res = await ack(base, `${saved}-7in3`);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).frame, `${saved}-7in3`);
+    const inbox = (file) => fs.readFile(path.join(inboxDir, file), 'utf8').then(JSON.parse);
+    assert.ok((await inbox('ampy-small-7in3.json')).deliveredAt);
+    assert.equal((await inbox('ampy-small.json')).deliveredAt, null);
+    assert.equal((await ack(base, saved)).status, 200);
+    assert.ok((await inbox('ampy-small.json')).deliveredAt);
+    assert.equal((await ack(base, '2000-01-01T00-00-00-000Z-abcdef-7in3')).status, 409);
+  });
 });
 
 test('panels: a frame with a color its panel lacks, or the wrong size, is refused', async () => {
@@ -766,15 +805,6 @@ test('panels: a converted image must be the size of its frame\'s panel', async (
     const good = await (await sendImage(base, { image: fakePng(800, 480).toString('base64'), frame: whiteLarge.toString('base64') })).json();
     assert.equal(good.panel, '7.3');
     assert.deepEqual((await fs.readdir(imagesDir)).sort(), [`${good.sent}-800.bin`, `${good.sent}-800.png`, `${good.sent}.json`].sort());
-  });
-});
-
-test('panels: a frame for a panel the partner has no display of is refused', async () => {
-  await withSendServer({}, async (base) => {
-    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
-    const res = await sendImage(base, { name: saved, frame: whiteLarge.toString('base64') });
-    assert.equal(res.status, 409);
-    assert.match((await res.json()).error, /Ampy has no 7\.3/);
   });
 });
 
@@ -840,43 +870,15 @@ test('orientation: a portrait copy is named apart from the landscape one', async
   }
 });
 
-test('orientation: a frame goes only to displays with its orientation', async () => {
-  await withSendServer({ config: orientationConfig }, async (base, { inboxDir }) => {
+test('orientation: the last 7.3 frame sent is the one served, landscape or portrait', async () => {
+  await withSendServer({ config: orientationConfig, devDevice: 'ampy-wide' }, async (base) => {
     const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
-    const tall = await (await sendImage(base, { name: saved, frame: whiteLarge.toString('base64'), orientation: 'portrait' })).json();
-    assert.deepEqual(tall, { sent: saved, to: 'Ampy', panel: '7.3', orientation: 'portrait', devices: ['ampy-tall'] });
-    const wide = await (await sendImage(base, { name: saved, frame: whiteLarge.toString('base64') })).json();
-    assert.deepEqual(wide, { sent: saved, to: 'Ampy', panel: '7.3', orientation: 'landscape', devices: ['ampy-wide'] });
-    // Two frames of one generation, one per orientation: each file is its own.
-    assert.deepEqual((await fs.readdir(inboxDir)).sort(), ['ampy-tall.json', 'ampy-wide.json']);
+    await sendImage(base, { name: saved, frame: whiteLarge.toString('base64'), orientation: 'portrait' });
+    assert.deepEqual(Buffer.from(await (await fetch(`${base}/api/device/frame-7in3`)).arrayBuffer()), whiteLarge);
+    const other = Buffer.alloc(192_000, 0x55);
+    await sendImage(base, { name: saved, frame: other.toString('base64') });
+    assert.deepEqual(Buffer.from(await (await fetch(`${base}/api/device/frame-7in3`)).arrayBuffer()), other);
   });
-});
-
-test('orientation: a portrait display fetches the portrait frame', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eink-'));
-  const imagesDir = path.join(dir, 'images');
-  const inboxDir = path.join(dir, 'inbox');
-  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ b64_json: 'aGVsbG8=' }] }), { status: 200 });
-  try {
-    let saved;
-    await withServer({ apiKey: 'sk-test', imagesDir, inboxDir, fetchImpl, config: orientationConfig, devUser: 'rod@example.com' }, async (base) => {
-      saved = (await (await generate(base, { prompt: 'a fox' })).json()).saved;
-      await sendImage(base, { name: saved, frame: whiteLarge.toString('base64'), orientation: 'portrait' });
-      await sendImage(base, { name: saved, frame: Buffer.alloc(192_000, 0x55).toString('base64') });
-    });
-    await withServer({ imagesDir, inboxDir, config: orientationConfig, devDevice: 'ampy-tall' }, async (base) => {
-      const res = await fetch(`${base}/api/device/frame`);
-      assert.equal(res.status, 200);
-      assert.equal(res.headers.get('x-frame-id'), saved);
-      assert.deepEqual(Buffer.from(await res.arrayBuffer()), whiteLarge);
-    });
-    await withServer({ imagesDir, inboxDir, config: orientationConfig, devDevice: 'ampy-wide' }, async (base) => {
-      const bytes = Buffer.from(await (await fetch(`${base}/api/device/frame`)).arrayBuffer());
-      assert.deepEqual(bytes, Buffer.alloc(192_000, 0x55));
-    });
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
 });
 
 test('orientation: a converted image must match the orientation it is sent for', async () => {
@@ -888,14 +890,5 @@ test('orientation: a converted image must match the orientation it is sent for',
     const right = await (await sendImage(base, { image: fakePng(480, 800).toString('base64'), orientation: 'portrait', frame: whiteLarge.toString('base64') })).json();
     assert.equal(right.orientation, 'portrait');
     assert.deepEqual((await fs.readdir(imagesDir)).sort(), [`${right.sent}-800-portrait.bin`, `${right.sent}-480-portrait.png`, `${right.sent}.json`].sort());
-  });
-});
-
-test('orientation: a partner with no display of that orientation is refused', async () => {
-  await withSendServer({ config: orientationConfig }, async (base) => {
-    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
-    const res = await sendImage(base, { name: saved, frame: Buffer.alloc(28_800, 0x11).toString('base64'), orientation: 'portrait' });
-    assert.equal(res.status, 409);
-    assert.match((await res.json()).error, /Ampy has no 1\.54″ 240×240 portrait display/);
   });
 });

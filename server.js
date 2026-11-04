@@ -307,9 +307,9 @@ async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
 // Sends a packed frame to the partner's display. The frame comes with either
 // the name of a stored generation or, for an image converted in the browser
 // (which the server never saw), its PNG, which then gets its own stored entry.
-// The frame's length says which panel it is for, so it goes only to the
-// partner's displays of that panel. It is stored as <stamp>.bin and becomes
-// the current frame in each of those inboxes; a newer send replaces it.
+// The frame's length says which panel it is for. It is stored as
+// <stamp>-<width>.bin and becomes the current frame in that panel's inbox of
+// each of the partner's displays; a newer send for that panel replaces it.
 async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   if (!user) return send(res, 403, { error: 'sending needs a signed-in user' });
   if (!imagesDir || !inboxDir) return send(res, 404, { error: 'image storage is off' });
@@ -335,8 +335,7 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   }
   const orientation = body.orientation === undefined ? DEFAULT_ORIENTATION : body.orientation;
   if (!ORIENTATIONS.includes(orientation)) return send(res, 400, { error: 'orientation must be landscape or portrait' });
-  const devices = owned.filter((d) => d.panel === panel && d.orientation === orientation);
-  if (!devices.length) return send(res, 409, { error: `${partner.name} has no ${PANELS[panel].label} ${orientation} display set in config.json` });
+  const devices = owned;
   const hasName = body.name !== undefined;
   const hasImage = body.image !== undefined;
   if (hasName === hasImage) return send(res, 400, { error: 'send either the name of a stored image or an image' });
@@ -367,12 +366,12 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
     }
   }
 
-  const entry = { frame: name, sentBy: user.email, sentAt: new Date().toISOString(), deliveredAt: null };
+  const entry = { frame: name, panel, orientation, sentBy: user.email, sentAt: new Date().toISOString(), deliveredAt: null };
   try {
     await fs.promises.writeFile(path.join(imagesDir, frameName(name, panel, orientation)), frame);
     await fs.promises.mkdir(inboxDir, { recursive: true });
     for (const device of devices) {
-      const file = path.join(inboxDir, `${device.id}.json`);
+      const file = inboxFile(inboxDir, device, panel);
       await withLock(file, () => writeAtomic(file, JSON.stringify(entry, null, 2) + '\n'));
     }
   } catch (e) {
@@ -382,27 +381,62 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   return send(res, 200, { sent: name, to: partner.name, panel, orientation, devices: devices.map((d) => d.id) });
 }
 
-// The display's current frame, unless it already has it (?after=<frame id>)
-// or nothing was sent to it: then 204. A device reads only its own inbox.
-async function deviceFrame(res, url, { imagesDir, inboxDir, device }) {
-  const entry = inboxDir ? await readInbox(path.join(inboxDir, `${device.id}.json`)) : null;
-  if (!entry || entry.frame === url.searchParams.get('after')) {
+// Which panel's frames each frame route hands out. The 1.54inch boards' firmware
+// keeps calling /api/device/frame; the 7.3inch board calls /api/device/frame-7in3.
+// A route only ever answers with frames of its panel's size.
+const FRAME_ROUTES = { '/api/device/frame': '1.54', '/api/device/frame-7in3': '7.3' };
+
+// What a panel's inbox file and frame ids end in. The 1.54 has none, so its
+// inboxes and ids stay what they were before there were two routes. Each
+// display has an inbox per panel, so a board of either size can use the
+// same service token without one's sends replacing the other's.
+const PANEL_SUFFIX = { '1.54': '', '7.3': '-7in3' };
+
+function inboxFile(inboxDir, device, panel) {
+  return path.join(inboxDir, `${device.id}${PANEL_SUFFIX[panel]}.json`);
+}
+
+// A frame id as the board sees it: the stamp, plus the panel's suffix.
+function frameId(stamp, panel) {
+  return `${stamp}${PANEL_SUFFIX[panel]}`;
+}
+
+// The panel and stamp a frame id names; the longest suffix that matches wins.
+function parseFrameId(id) {
+  const panel = Object.keys(PANEL_SUFFIX)
+    .sort((a, b) => PANEL_SUFFIX[b].length - PANEL_SUFFIX[a].length)
+    .find((p) => id.endsWith(PANEL_SUFFIX[p]));
+  return { panel, stamp: id.slice(0, id.length - PANEL_SUFFIX[panel].length) };
+}
+
+// The display's current frame for the route's panel, unless it already has it
+// (?after=<frame id>) or nothing of that size was sent to it: then 204.
+// A device reads only its own inboxes.
+async function deviceFrame(res, url, { imagesDir, inboxDir, device, panel }) {
+  const entry = inboxDir ? await readInbox(inboxFile(inboxDir, device, panel)) : null;
+  if (!entry || frameId(entry.frame, panel) === url.searchParams.get('after')) {
     res.writeHead(204, { 'cache-control': 'no-store' });
     return res.end();
   }
   // The name ends up in a path, so it must be one newStamp made.
   if (!SAVED_NAME.test(String(entry.frame))) return send(res, 500, { error: 'inbox is damaged' });
+  // Which of the stamp's frames of this size; the board draws it as it comes.
+  const orientation = ORIENTATIONS.includes(entry.orientation) ? entry.orientation : device.orientation;
   let frame;
   try {
-    frame = await fs.promises.readFile(path.join(imagesDir, frameName(entry.frame, device.panel, device.orientation)));
+    frame = await fs.promises.readFile(path.join(imagesDir, frameName(entry.frame, panel, orientation)));
   } catch (e) {
     console.error(`frame ${entry.frame} for ${device.id} is missing: ${e.message}`);
     return send(res, 404, { error: 'the current frame is missing' });
   }
+  if (frame.length !== frameBytes(PANELS[panel])) {
+    console.error(`frame ${entry.frame} for ${device.id} is ${frame.length} bytes, not a ${PANELS[panel].label} frame`);
+    return send(res, 500, { error: 'the current frame is the wrong size' });
+  }
   res.writeHead(200, {
     'content-type': 'application/octet-stream',
     'content-length': frame.length,
-    'x-frame-id': entry.frame,
+    'x-frame-id': frameId(entry.frame, panel),
     'cache-control': 'no-store',
   });
   return res.end(frame);
@@ -437,16 +471,18 @@ async function lastSeen(inboxDir, device) {
 async function deviceAck(res, url, { inboxDir, device }) {
   const id = url.searchParams.get('frame') || '';
   if (!inboxDir) return send(res, 404, { error: 'nothing was sent to this display' });
-  const file = path.join(inboxDir, `${device.id}.json`);
+  // The id's suffix says which panel's inbox the board drew from.
+  const { panel, stamp } = parseFrameId(id);
+  const file = inboxFile(inboxDir, device, panel);
   return withLock(file, async () => {
     const entry = await readInbox(file);
     if (!entry) return send(res, 404, { error: 'nothing was sent to this display' });
-    if (entry.frame !== id) return send(res, 409, { error: 'that is not the current frame', current: entry.frame });
+    if (entry.frame !== stamp) return send(res, 409, { error: 'that is not the current frame', current: frameId(entry.frame, panel) });
     if (!entry.deliveredAt) {
       entry.deliveredAt = new Date().toISOString();
       await writeAtomic(file, JSON.stringify(entry, null, 2) + '\n');
     }
-    return send(res, 200, { frame: entry.frame, deliveredAt: entry.deliveredAt });
+    return send(res, 200, { frame: frameId(entry.frame, panel), deliveredAt: entry.deliveredAt });
   });
 }
 
@@ -563,9 +599,9 @@ export function createApp({
       if (identity?.kind !== 'device') return send(res, 403, { error: 'only a display can use /api/device/' });
       const { device } = identity;
       await markSeen(inboxDir, device);
-      if (url.pathname === '/api/device/frame') {
+      if (Object.hasOwn(FRAME_ROUTES, url.pathname)) {
         if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
-        return deviceFrame(res, url, { imagesDir, inboxDir, device });
+        return deviceFrame(res, url, { imagesDir, inboxDir, device, panel: FRAME_ROUTES[url.pathname] });
       }
       if (url.pathname === '/api/device/ack') {
         if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
