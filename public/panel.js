@@ -25,12 +25,12 @@ export const PANELS = {
     label: '1.54″ 240×240', width: 240, height: 240, api: '1024x1024', apiPortrait: '1024x1024',
     codes: { black: 0x0, white: 0x1, yellow: 0x2, red: 0x3, blue: 0x5, green: 0x6 },
   },
-  // The 7.3inch e-Paper HAT (E), a Spectra 6 panel. Codes from memory of
-  // Waveshare's EPD_7in3e driver header, not yet checked on the wired panel:
-  // run the color band test before trusting a frame. Orange and clean are not inks here.
+  // The 7.3inch e-Paper HAT (E), a Spectra 6 panel. Its codes are the ones
+  // the board's firmware draws with (main/epd_7in3e.h in ESP-Ink-Generator),
+  // checked with its color bar test on the wired panel. Orange and clean are not inks here.
   '7.3': {
     label: '7.3″ 800×480', width: 800, height: 480, api: '1536x1024', apiPortrait: '1024x1536',
-    codes: { black: 0x0, white: 0x1, green: 0x2, blue: 0x3, red: 0x4, yellow: 0x5 },
+    codes: { black: 0x0, white: 0x1, yellow: 0x2, red: 0x3, blue: 0x5, green: 0x6 },
   },
 };
 

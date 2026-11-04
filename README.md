@@ -54,21 +54,21 @@ a frame of the wrong size is refused. Which board gets it is up to the route
 the board calls (see below), not to `config.json`. The browser remembers the chosen Display, like
 the style.
 
-The 7.3inch ink codes are from Waveshare's `EPD_7in3e` driver header, written
-from memory. They have **not** been checked with a color band test on a wired
-panel the way the 1.54inch codes were. Check them before trusting a frame:
+The 7.3inch ink codes are the ones the board's firmware draws with
+(`main/epd_7in3e.h` in ESP-Ink-Generator), checked with its color bar test on
+the wired panel. They are the same as the 1.54inch codes:
 
 | Ink    | 7.3inch code |
 | ------ | ------------ |
 | black  | `0x0`        |
 | white  | `0x1`        |
-| green  | `0x2`        |
-| blue   | `0x3`        |
-| red    | `0x4`        |
-| yellow | `0x5`        |
+| yellow | `0x2`        |
+| red    | `0x3`        |
+| blue   | `0x5`        |
+| green  | `0x6`        |
 
 The display's own firmware is not in this repo: it has to fetch the 192,000-byte
-frame from `/api/device/frame` and draw it.
+frame from `/api/device/frame-7in3` and draw it.
 
 ## Styles
 

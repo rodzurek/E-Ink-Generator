@@ -784,12 +784,14 @@ test('panels: each board acknowledges its own frame, the id says which', async (
 test('panels: a frame with a color its panel lacks, or the wrong size, is refused', async () => {
   await withSendServer({ config: panelConfig }, async (base) => {
     const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
-    // Code 6 is an ink on the 1.54inch panel only; code 4 is an ink on the 7.3 only.
-    const green7 = await sendImage(base, { name: saved, frame: Buffer.alloc(192_000, 0x66).toString('base64') });
-    assert.equal(green7.status, 400);
-    assert.deepEqual(await green7.json(), { error: 'frame holds a color the panel does not have' });
-    const red1 = await sendImage(base, { name: saved, frame: Buffer.alloc(28_800, 0x44).toString('base64') });
-    assert.equal(red1.status, 400);
+    // Both panels use codes 0-3, 5 and 6; code 4 and 7 are inks on neither.
+    const four = await sendImage(base, { name: saved, frame: Buffer.alloc(192_000, 0x44).toString('base64') });
+    assert.equal(four.status, 400);
+    assert.deepEqual(await four.json(), { error: 'frame holds a color the panel does not have' });
+    const seven = await sendImage(base, { name: saved, frame: Buffer.alloc(28_800, 0x77).toString('base64') });
+    assert.equal(seven.status, 400);
+    const green = await sendImage(base, { name: saved, frame: Buffer.alloc(192_000, 0x66).toString('base64') });
+    assert.equal(green.status, 200);
     const other = await sendImage(base, { name: saved, frame: Buffer.alloc(100, 0x11).toString('base64') });
     assert.equal(other.status, 400);
     assert.match((await other.json()).error, /28800 or 192000 bytes/);
