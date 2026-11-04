@@ -213,7 +213,7 @@
     // Always packed from Spectra 6, whatever the palette picklist shows: a frame
     // from any other palette would come out wrong on the panel. The dither
     // setting is kept. The server takes the panel from the frame's length, and
-    // sends it only to the partner's displays of that panel.
+    // puts it in that panel's inbox of each of the partner's displays.
     async function sendToPartner() {
       if (!source || !partner) return;
       const name = savedName;

@@ -48,9 +48,10 @@ one it is the 1.54inch panel. Its `"orientation"` is `landscape` by default, or
 what is generated, converted and shown. A portrait image is turned clockwise
 into the panel's raster before packing, so a display mounted upright shows it
 upright; if a picture comes out turned the other way, the turn in `toPanel`
-(`public/panel.js`) has the wrong direction. A frame goes only to the partner's
-displays of its panel and orientation, and the server takes the panel from the
-frame's length, so a frame of the wrong size is refused. The browser remembers the chosen Display, like
+(`public/panel.js`) has the wrong direction. A frame goes to all of the
+partner's displays, and the server takes the panel from the frame's length, so
+a frame of the wrong size is refused. Which board gets it is up to the route
+the board calls (see below), not to `config.json`. The browser remembers the chosen Display, like
 the style.
 
 The 7.3inch ink codes are from Waveshare's `EPD_7in3e` driver header, written
@@ -140,12 +141,14 @@ the server has never seen. The frame is written as `images/<stamp>-<width>.bin`
 (`-240.bin` or `-800.bin`), so one generation can go to both panels. A converted
 image gets its own entry: `<stamp>-<width>.png`, `<stamp>-<width>.bin` and a
 `.json` with `created`, `createdBy`, `source: "upload"`, `panel` and `orientation`.
-`orientation` (default `landscape`) says which of the partner's displays
-it is for. Then `inbox/<device>.json`
-(git-ignored, `INBOX_DIR`) for each of the partner's displays in
-`config.json` holds `frame` (the stamp), `sentBy`, `sentAt` and
-`deliveredAt` (`null` until the display acknowledges). There is no queue: a
-newer send replaces the frame. Sending needs a signed-in user (or `DEV_USER`)
+`orientation` (default `landscape`) only picks the size of a converted image
+and the frame's file name; it does not pick a display. Then, for each of the
+partner's displays in `config.json`, the inbox of the frame's panel
+(git-ignored, `INBOX_DIR`): `inbox/<device>.json` for a 1.54 frame,
+`inbox/<device>-7in3.json` for a 7.3 one. It holds `frame` (the stamp),
+`panel`, `orientation`, `sentBy`, `sentAt` and `deliveredAt` (`null` until
+the board acknowledges). There is no queue: a newer send for that panel
+replaces the frame, and leaves the other panel's inbox as it was. Sending needs a signed-in user (or `DEV_USER`)
 whose partner has a display.
 
 ## The display's endpoints
@@ -154,13 +157,21 @@ Displays pull; nothing is pushed to them. Both endpoints need a display's
 identity (its Access service token, or `DEV_DEVICE` locally), and a display
 only ever sees its own inbox.
 
-- `GET /api/device/frame?after=<frame id>` answers **204** when nothing was
-  sent to the display yet, or when `after` is already the current frame.
-  Otherwise **200** with the raw frame for the display's panel as
-  `application/octet-stream`, a `Content-Length`, and the frame id in
-  `X-Frame-Id`. Leave `after` empty on the first call.
+- `GET /api/device/frame?after=<frame id>` is the 1.54inch boards' route and
+  only ever hands out 240x240 frames (28,800 bytes). It answers **204** when
+  no 1.54 frame was sent to the display yet, or when `after` is already the
+  current one. Otherwise **200** with the raw frame as
+  `application/octet-stream`, a `Content-Length`, and the frame id (the stamp)
+  in `X-Frame-Id`. Leave `after` empty on the first call.
+- `GET /api/device/frame-7in3?after=<frame id>` is the same for the 7.3inch
+  board, and only ever hands out 800x480 frames (192,000 bytes). Its frame ids
+  end in `-7in3`, so an acknowledge says which board drew it.
+
+Because each panel has its own inbox, the 1.54 and the 7.3 board can use the
+same service token: each sees only frames of its own size.
+
 - `POST /api/device/ack?frame=<frame id>` records `deliveredAt` in the
-  display's inbox after it has drawn the frame and answers **200** with
+  inbox the id is from after it has drawn the frame and answers **200** with
   `{ frame, deliveredAt }`. Acknowledging again keeps the first time. A frame
   that has since been replaced by a newer send answers **409** and leaves
   the newer one undelivered; with nothing sent, **404**.
@@ -371,7 +382,9 @@ fetched the app answers 503 rather than letting anyone in.
 `server.js`. Each user has an `email`, a `name` and their `partner`'s email;
 each device has an `id` (lowercase letters, digits and `-`), the `clientId` of
 its service token, its `owner`'s email, its `panel` (`1.54` by default, or
-`7.3`) and its `orientation` (`landscape` by default, or `portrait`). The Client ID is an identifier, not
+`7.3`) and its `orientation` (`landscape` by default, or `portrait`). `panel`
+and `orientation` only label the display in the page; they do not decide what
+it is sent. The Client ID is an identifier, not
 a secret; the Client Secret lives only on the device and is never written into
 the app. A mistake in the file stops the server at start-up with the reason.
 
