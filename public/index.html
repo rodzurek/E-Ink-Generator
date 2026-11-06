@@ -63,6 +63,7 @@
         <button id="go">Generate</button>
         <a class="button" id="download" hidden>Download PNG</a>
         <button id="send" hidden>Send</button>
+        <button id="preview" hidden title="Show it on their display for 2 minutes, then go back to what it showed before">Preview 2 min</button>
         <button id="broadcast" hidden title="Send to every display">Broadcast</button>
         <span class="muted" id="status"></span>
       </div>
@@ -190,7 +191,7 @@
     function render() {
       if (!source) return;
       ctx.putImageData(reduce(inks(), $('dither').checked), 0, 0);
-      $('send').hidden = !partner;
+      $('send').hidden = $('preview').hidden = !partner;
       $('broadcast').hidden = !signedIn;
       $('download').download = `eink-${source.width}x${source.height}.png`;
       canvas.toBlob((blob) => {
@@ -221,8 +222,11 @@
     // from any other palette would come out wrong on the panel. The dither
     // setting is kept. The server takes the panel from the frame's length, and
     // puts it in that panel's inbox of each of the partner's displays, or of
-    // every display when broadcasting.
-    async function sendFrame(broadcast) {
+    // every display when broadcasting. A preview goes to the partner's
+    // displays for two minutes, then they go back to what they showed before.
+    // mode is 'send', 'preview' or 'broadcast'.
+    async function sendFrame(mode) {
+      const broadcast = mode === 'broadcast';
       if (!source || !(broadcast ? signedIn : partner)) return;
       const name = savedName;
       const image = reduce(PALETTES[SPECTRA_6], $('dither').checked);
@@ -240,17 +244,21 @@
         body.image = scratch.toDataURL('image/png').split(',')[1];
       }
       if (broadcast) body.to = 'all';
-      $('send').disabled = $('broadcast').disabled = true;
+      if (mode === 'preview') body.preview = true;
+      const buttons = ['send', 'preview', 'broadcast'].map($);
+      for (const b of buttons) b.disabled = true;
       $('status').textContent = broadcast ? 'sending to every display…' : `sending to ${partner.name}…`;
       try {
         const res = await api('/api/send', { method: 'POST', headers, body: JSON.stringify(body) });
         const d = await res.json();
         if (d.error) throw new Error(d.error);
-        $('status').textContent = broadcast ? `sent to every display (${d.devices.length})` : `sent to ${d.to}'s display`;
+        $('status').textContent = broadcast ? `sent to every display (${d.devices.length})`
+          : d.preview ? `previewing on ${d.to}'s display until ${new Date(d.revertAt).toLocaleTimeString()}`
+          : `sent to ${d.to}'s display`;
       } catch (e) {
         $('status').textContent = `not sent: ${e.message}`;
       } finally {
-        $('send').disabled = $('broadcast').disabled = false;
+        for (const b of buttons) b.disabled = false;
       }
     }
 
@@ -326,8 +334,7 @@
     }
 
     $('go').addEventListener('click', generate);
-    $('send').addEventListener('click', () => sendFrame(false));
-    $('broadcast').addEventListener('click', () => sendFrame(true));
+    for (const mode of ['send', 'preview', 'broadcast']) $(mode).addEventListener('click', () => sendFrame(mode));
     for (const id of ['camera', 'upload']) {
       $(id).addEventListener('change', () => {
         convert($(id).files[0]);
@@ -390,7 +397,7 @@
         signedIn = Boolean(d.user);
         showDisplays(d.displays || []);
         if (partner) $('send').textContent = `Send to ${partner.name}`;
-        $('send').hidden = !(partner && source);
+        $('send').hidden = $('preview').hidden = !(partner && source);
         $('broadcast').hidden = !(signedIn && source);
         $('info').textContent = d.ready ? 'colored e-ink images for the 1.54″ and 7.3″ displays' : 'OPENAI_API_KEY is not set on the server';
         for (const model of d.models) $('model').add(new Option(model, model));
