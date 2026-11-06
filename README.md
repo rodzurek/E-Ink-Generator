@@ -81,6 +81,11 @@ fox under a yellow moon". There is no option to send the text bare: without
 the panel rules the result does not hold up on the display. The styles are
 `STYLES` in `public/index.html`.
 
+**Custom Style** adds no look: the text typed goes as it is, so describe the
+style in it, e.g. "a red fox under a yellow moon, as a watercolor". Only the
+panel's size and shape, the palette's colors and "must remain recognizable after
+downscaling" are added; the flat fills, outlines and no-text rules are left out.
+
 ## Install on Android
 
 Open the site in Chrome on the phone, then menu → **Add to Home screen** →

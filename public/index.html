@@ -96,6 +96,7 @@
       '3-color — black, white, yellow': ['black', 'white', 'yellow'],
     };
 
+    const CUSTOM = 'Custom Style';
     // What goes in front of the shared panel rules; [SUBJECT] is the text typed.
     // There is deliberately no way to send the text bare: without the panel
     // rules the result does not survive the panel's size and six inks.
@@ -111,6 +112,8 @@
       'Minimal icon': 'Create a minimal icon-style image of [SUBJECT] using very large simple shapes, a strong silhouette, and an ultra-clean composition. Keep the background minimal and emphasize clarity over detail.',
       'Comic book': 'Create a comic book–inspired image of [SUBJECT] with bold outlines, dramatic simplified shapes, and strong visual contrast. Keep the composition dynamic but uncluttered, with one clear focal subject.',
       'Sticker / vinyl decal': 'Create a sticker-style illustration of [SUBJECT] with thick outlines, flat color areas, simplified shapes, and a clean cutout look. Keep the subject large and centered with little or no background detail.',
+      // The text typed as it is, the style included: only the panel's size and inks are added.
+      [CUSTOM]: '[SUBJECT]',
     };
 
     const $ = (id) => document.getElementById(id);
@@ -299,8 +302,12 @@
       const colors = inks().join(', ').replace(/, ([^,]+)$/, ', and $1');
       const { width, height } = viewNow();
       const shape = width === height ? '' : width > height ? ' Wide landscape composition.' : ' Tall portrait composition.';
-      // Every style ends with the same rules for the panel.
-      prompt = `${STYLES[style].replace('[SUBJECT]', () => subject)}\n\nOptimized for a ${width}x${height} pixel color e-ink display.${shape} Use only ${colors}. Flat solid fills, bold simple shapes, thick outlines, high contrast, no gradients, no shadows, no textures, no fine detail, no text. Keep one main subject large and clear, with a simple uncluttered background and strong negative space. The image must remain recognizable after downscaling to ${width}x${height}.`;
+      // Every style ends with the same rules for the panel. Custom Style sends
+      // the text as typed and only the panel's size and inks, no look.
+      const panelRules = `Optimized for a ${width}x${height} pixel color e-ink display.${shape} Use only ${colors}.`;
+      prompt = style === CUSTOM
+        ? `${typed}\n\n${panelRules} The image must remain recognizable after downscaling to ${width}x${height}.`
+        : `${STYLES[style].replace('[SUBJECT]', () => subject)}\n\n${panelRules} Flat solid fills, bold simple shapes, thick outlines, high contrast, no gradients, no shadows, no textures, no fine detail, no text. Keep one main subject large and clear, with a simple uncluttered background and strong negative space. The image must remain recognizable after downscaling to ${width}x${height}.`;
       $('go').disabled = true;
       $('status').textContent = 'generating… this can take a minute';
       try {
