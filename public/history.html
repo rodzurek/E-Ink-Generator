@@ -44,6 +44,8 @@
     const { PANELS, DEFAULT_PANEL, DEFAULT_ORIENTATION, PANEL_INKS, viewOf, toPanel, reduce, scale, packFrame, base64 } = await import('/panel.js' + carry);
     // The partner whose display Send goes to, from /api/info; null when there is none.
     let partner = null;
+    // Whether someone is signed in, from /api/info: Broadcast needs a user but no partner.
+    let signedIn = false;
     $('back').href += carry;
     $('icon').href += carry;
 
@@ -84,10 +86,11 @@
 
     // Packed again from the original, reduced to Spectra 6 and dithered as the
     // generator does by default: the stored copy may show another palette,
-    // which would come out wrong on the panel.
-    async function sendToPartner(g, button, status) {
-      button.disabled = true;
-      status.textContent = `sending to ${partner.name}…`;
+    // which would come out wrong on the panel. Broadcast sends it to every
+    // display instead of only the partner's.
+    async function sendFrame(g, broadcast, buttons, status) {
+      for (const b of buttons) b.disabled = true;
+      status.textContent = broadcast ? 'sending to every display…' : `sending to ${partner.name}…`;
       try {
         const panel = PANELS[g.panel] ?? PANELS[DEFAULT_PANEL];
         const orientation = g.orientation ?? DEFAULT_ORIENTATION;
@@ -98,15 +101,15 @@
         const res = await api('/api/send' + carry, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ frame, name: g.name, orientation }),
+          body: JSON.stringify({ frame, name: g.name, orientation, ...(broadcast ? { to: 'all' } : {}) }),
         });
         const d = await res.json();
         if (d.error) throw new Error(d.error);
-        status.textContent = `sent to ${d.to}'s display`;
+        status.textContent = broadcast ? `sent to every display (${d.devices.length})` : `sent to ${d.to}'s display`;
       } catch (e) {
         status.textContent = `not sent: ${e.message}`;
       } finally {
-        button.disabled = false;
+        for (const b of buttons) b.disabled = false;
       }
     }
 
@@ -163,11 +166,19 @@
       const row = element('div', '', 'actions');
       const status = element('span', '', 'muted');
       const buttons = [];
+      const sending = [];
       if (partner) {
         const send = element('button', `Send to ${partner.name}`);
-        send.addEventListener('click', () => sendToPartner(g, send, status));
-        buttons.push(send);
+        send.addEventListener('click', () => sendFrame(g, false, sending, status));
+        sending.push(send);
       }
+      if (signedIn) {
+        const broadcast = element('button', 'Broadcast');
+        broadcast.title = 'Send to every display';
+        broadcast.addEventListener('click', () => sendFrame(g, true, sending, status));
+        sending.push(broadcast);
+      }
+      buttons.push(...sending);
       const remove = element('button', 'Delete', 'delete');
       remove.addEventListener('click', () => deleteGeneration(g, node, buttons, status));
       buttons.push(remove);
@@ -179,7 +190,7 @@
     // Without a partner the page still lists the history, just with no Send button.
     api('/api/info' + carry)
       .then((r) => r.json())
-      .then((d) => { partner = d.partner || null; })
+      .then((d) => { partner = d.partner || null; signedIn = Boolean(d.user); })
       .catch(() => {})
       .then(() => api('/api/generations' + carry))
       .then((r) => r.json())

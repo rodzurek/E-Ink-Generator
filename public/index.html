@@ -63,6 +63,7 @@
         <button id="go">Generate</button>
         <a class="button" id="download" hidden>Download PNG</a>
         <button id="send" hidden>Send</button>
+        <button id="broadcast" hidden title="Send to every display">Broadcast</button>
         <span class="muted" id="status"></span>
       </div>
 
@@ -125,6 +126,8 @@
     let usageNote = '';
     // The partner whose display Send goes to, from /api/info; null when there is none.
     let partner = null;
+    // Whether someone is signed in, from /api/info: Broadcast needs a user but no partner.
+    let signedIn = false;
 
     for (const label of Object.keys(PALETTES)) $('palette').add(new Option(label, label));
     for (const label of Object.keys(STYLES)) $('style').add(new Option(label, label));
@@ -185,6 +188,7 @@
       if (!source) return;
       ctx.putImageData(reduce(inks(), $('dither').checked), 0, 0);
       $('send').hidden = !partner;
+      $('broadcast').hidden = !signedIn;
       $('download').download = `eink-${source.width}x${source.height}.png`;
       canvas.toBlob((blob) => {
         const link = $('download');
@@ -213,9 +217,10 @@
     // Always packed from Spectra 6, whatever the palette picklist shows: a frame
     // from any other palette would come out wrong on the panel. The dither
     // setting is kept. The server takes the panel from the frame's length, and
-    // puts it in that panel's inbox of each of the partner's displays.
-    async function sendToPartner() {
-      if (!source || !partner) return;
+    // puts it in that panel's inbox of each of the partner's displays, or of
+    // every display when broadcasting.
+    async function sendFrame(broadcast) {
+      if (!source || !(broadcast ? signedIn : partner)) return;
       const name = savedName;
       const image = reduce(PALETTES[SPECTRA_6], $('dither').checked);
       // The frame is the panel's own raster, so a portrait image is turned to it; the server gets the panel and orientation to route by.
@@ -231,17 +236,18 @@
         scratch.getContext('2d').putImageData(image, 0, 0);
         body.image = scratch.toDataURL('image/png').split(',')[1];
       }
-      $('send').disabled = true;
-      $('status').textContent = `sending to ${partner.name}…`;
+      if (broadcast) body.to = 'all';
+      $('send').disabled = $('broadcast').disabled = true;
+      $('status').textContent = broadcast ? 'sending to every display…' : `sending to ${partner.name}…`;
       try {
         const res = await api('/api/send', { method: 'POST', headers, body: JSON.stringify(body) });
         const d = await res.json();
         if (d.error) throw new Error(d.error);
-        $('status').textContent = `sent to ${d.to}'s display`;
+        $('status').textContent = broadcast ? `sent to every display (${d.devices.length})` : `sent to ${d.to}'s display`;
       } catch (e) {
         $('status').textContent = `not sent: ${e.message}`;
       } finally {
-        $('send').disabled = false;
+        $('send').disabled = $('broadcast').disabled = false;
       }
     }
 
@@ -313,7 +319,8 @@
     }
 
     $('go').addEventListener('click', generate);
-    $('send').addEventListener('click', sendToPartner);
+    $('send').addEventListener('click', () => sendFrame(false));
+    $('broadcast').addEventListener('click', () => sendFrame(true));
     for (const id of ['camera', 'upload']) {
       $(id).addEventListener('change', () => {
         convert($(id).files[0]);
@@ -373,9 +380,11 @@
       .then((d) => {
         if (d.error) throw new Error(d.error);
         partner = d.partner;
+        signedIn = Boolean(d.user);
         showDisplays(d.displays || []);
         if (partner) $('send').textContent = `Send to ${partner.name}`;
         $('send').hidden = !(partner && source);
+        $('broadcast').hidden = !(signedIn && source);
         $('info').textContent = d.ready ? 'colored e-ink images for the 1.54″ and 7.3″ displays' : 'OPENAI_API_KEY is not set on the server';
         for (const model of d.models) $('model').add(new Option(model, model));
         // Start on the last model picked in this browser, else the server's default.
