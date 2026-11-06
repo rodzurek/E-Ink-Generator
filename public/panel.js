@@ -84,24 +84,35 @@ function nearest(colors, r, g, b) {
 }
 
 // `source` (an ImageData, any size) reduced to the given inks, as ImageData of the same size.
+// When `source.content` says where the image sits (set by scale), the dither's
+// error is only spread inside it: spread into the black bars, it would add up
+// there and turn bar pixels into colors, so the image seemed to bleed into them.
 export function reduce(source, names, dither) {
   const { width, height } = source;
+  const { left, top, width: w, height: h } = source.content ?? { left: 0, top: 0, width, height };
+  const right = left + w;
+  const bottom = top + h;
   const colors = names.map((name) => INK[name]);
   const px = new Float32Array(source.data);
   const out = new ImageData(width, height);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
+      // Kept to 0..255: a color the inks cannot mix (a cyan sky; Spectra 6 has
+      // no cyan) leaves error the same way at every pixel, and unclamped it
+      // piles up and is let out at the next edge as a pale halo round shapes.
+      for (let k = 0; k < 3; k++) px[i + k] = Math.min(255, Math.max(0, px[i + k]));
       const c = nearest(colors, px[i], px[i + 1], px[i + 2]);
+      const inside = x >= left && x < right && y >= top && y < bottom;
       for (let k = 0; k < 3; k++) {
         out.data[i + k] = c[k];
-        if (!dither) continue;
+        if (!dither || !inside) continue;
         const error = px[i + k] - c[k];
-        if (x + 1 < width) px[i + 4 + k] += error * 7 / 16;
-        if (y + 1 < height) {
-          if (x > 0) px[i + width * 4 - 4 + k] += error * 3 / 16;
+        if (x + 1 < right) px[i + 4 + k] += error * 7 / 16;
+        if (y + 1 < bottom) {
+          if (x > left) px[i + width * 4 - 4 + k] += error * 3 / 16;
           px[i + width * 4 + k] += error * 5 / 16;
-          if (x + 1 < width) px[i + width * 4 + 4 + k] += error * 1 / 16;
+          if (x + 1 < right) px[i + width * 4 + 4 + k] += error * 1 / 16;
         }
       }
       out.data[i + 3] = 255;
@@ -129,7 +140,10 @@ export function scale(ctx, img, { width, height }) {
   ctx.fillRect(left, top, drawWidth, drawHeight);
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(img, left, top, drawWidth, drawHeight);
-  return ctx.getImageData(0, 0, width, height);
+  const data = ctx.getImageData(0, 0, width, height);
+  // Where the image sits, so reduce keeps the dither out of the bars.
+  data.content = { left, top, width: drawWidth, height: drawHeight };
+  return data;
 }
 
 // The panel's frame: row by row from the top left, two pixels per byte,
