@@ -515,17 +515,22 @@ async function expirePreview(file) {
   await fs.writeFile(file, JSON.stringify({ ...entry, revertAt: new Date(Date.now() - 1000).toISOString() }));
 }
 
-test('preview: shown for two minutes, then the display gets its frame from before back', async () => {
-  await withSendServer({ devUser: 'rod@example.com', devDevice: 'ampy-display' }, async (base, { inboxDir }) => {
+test('preview: on the sender\'s own display for two minutes, then its frame from before is back', async () => {
+  await withSendServer({ devUser: 'rod@example.com', devDevice: 'rod-display' }, async (base, { inboxDir }) => {
     const send = (extra) => sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64'), ...extra }).then((r) => r.json());
-    const before = (await send()).sent;
+    // Broadcast, so Rod's own display has a frame to go back to.
+    const before = (await send({ to: 'all' })).sent;
     assert.equal((await ack(base, before)).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 5));
 
     const shown = await send({ preview: true });
     assert.equal(shown.preview, true);
+    assert.equal(shown.to, 'Rod');
+    assert.deepEqual(shown.devices, ['rod-display']);
     assert.ok(Math.abs(Date.parse(shown.revertAt) - Date.now() - 120_000) < 5000);
-    const file = path.join(inboxDir, 'ampy-display.json');
+    // The partner's display is left alone.
+    assert.equal(JSON.parse(await fs.readFile(path.join(inboxDir, 'ampy-display.json'), 'utf8')).frame, before);
+    const file = path.join(inboxDir, 'rod-display.json');
     const res = await fetch(`${base}/api/device/frame?after=${before}`);
     assert.equal(res.headers.get('x-frame-id'), shown.sent);
 
@@ -545,24 +550,29 @@ test('preview: shown for two minutes, then the display gets its frame from befor
   });
 });
 
-test('preview: a newer send ends it, and preview must be a boolean', async () => {
-  await withSendServer({ devUser: 'rod@example.com', devDevice: 'ampy-display' }, async (base, { inboxDir }) => {
-    const body = { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') };
+test('preview: a broadcast ends it; preview is a boolean, not with to, and needs a display of your own', async () => {
+  const body = { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') };
+  await withSendServer({ devUser: 'rod@example.com', devDevice: 'rod-display' }, async (base, { inboxDir }) => {
     await sendImage(base, { ...body, preview: true });
     await new Promise((resolve) => setTimeout(resolve, 5));
-    const kept = (await (await sendImage(base, body)).json()).sent;
-    const file = path.join(inboxDir, 'ampy-display.json');
-    await expirePreview(file);
+    const kept = (await (await sendImage(base, { ...body, to: 'all' })).json()).sent;
+    await expirePreview(path.join(inboxDir, 'rod-display.json'));
     assert.equal((await fetch(`${base}/api/device/frame`)).headers.get('x-frame-id'), kept);
     assert.equal((await sendImage(base, { ...body, preview: 'yes' })).status, 400);
+    assert.equal((await sendImage(base, { ...body, preview: true, to: 'all' })).status, 400);
+  });
+  await withSendServer({ devUser: 'solo@example.com' }, async (base) => {
+    assert.equal((await sendImage(base, { ...body, preview: true })).status, 409);
   });
 });
 
 test('preview: deleting the frame a preview goes back to keeps it', async () => {
   await withSendServer({}, async (base, { imagesDir }) => {
     const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
-    await sendImage(base, { name: saved, frame: whiteFrame.toString('base64') });
+    await sendImage(base, { name: saved, frame: whiteFrame.toString('base64'), to: 'all' });
     await sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64'), preview: true });
+    // Gone from Ampy's inbox by a newer send; only Rod's preview still goes back to it.
+    await sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') });
     const res = await fetch(`${base}/api/delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: saved }) });
     assert.equal((await res.json()).frameKept, true);
     await fs.access(path.join(imagesDir, `${saved}-240.bin`));

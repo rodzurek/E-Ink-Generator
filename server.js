@@ -315,7 +315,8 @@ async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
 // each of the partner's displays; a newer send for that panel replaces it.
 // With `to: "all"` (Broadcast) it goes to every display in config.json
 // instead, the sender's own included, and no partner is needed.
-// With `preview: true` the frame only stays PREVIEW_MS: the inbox keeps the
+// With `preview: true` it goes to the sender's own displays instead, to check
+// it before sending it on, and only stays PREVIEW_MS: the inbox keeps the
 // entry from before as `previous`, and the display gets it back (settleInbox).
 async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   if (!user) return send(res, 403, { error: 'sending needs a signed-in user' });
@@ -331,9 +332,13 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   const broadcast = body.to === 'all';
   if (body.preview !== undefined && typeof body.preview !== 'boolean') return send(res, 400, { error: 'preview must be true or false' });
   const preview = body.preview === true;
+  if (preview && broadcast) return send(res, 400, { error: 'a preview goes to your own display, not to all' });
   let partner = null;
   let devices;
-  if (broadcast) {
+  if (preview) {
+    devices = [...config.devices.values()].filter((d) => d.owner === user.email);
+    if (!devices.length) return send(res, 409, { error: 'you have no display set in config.json' });
+  } else if (broadcast) {
     devices = [...config.devices.values()];
     if (!devices.length) return send(res, 409, { error: 'there is no display set in config.json' });
   } else {
@@ -405,7 +410,7 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
     console.error(`could not send ${name}: ${e.message}`);
     return send(res, 500, { error: 'could not store the frame' });
   }
-  const answer = { sent: name, to: broadcast ? 'all' : partner.name, panel, orientation, devices: devices.map((d) => d.id) };
+  const answer = { sent: name, to: broadcast ? 'all' : preview ? (user.name ?? user.email) : partner.name, panel, orientation, devices: devices.map((d) => d.id) };
   return send(res, 200, preview ? { ...answer, preview: true, revertAt } : answer);
 }
 
