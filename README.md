@@ -112,6 +112,11 @@ appears. It packs the image into the frame of the panel picked in **Display**
 and posts it to `/api/send`; the server stores it and makes it the current frame for the
 partner's display, which fetches it from there (the device endpoints).
 
+**Broadcast**, next to it on the generator and on History, sends the same frame
+to every display in `config.json`, your own included. It needs a signed-in user
+but no partner. The frame still only lands in the inbox of its own panel, so a
+7.3 broadcast reaches the 7.3 boards and leaves the 1.54 inboxes as they were.
+
 Both displays are Spectra 6 panels, so the frame is always reduced to the
 Spectra 6 inks, whatever the palette picklist shows; the dither setting is
 kept. The other palettes only change the preview and the download.
@@ -150,7 +155,9 @@ partner's displays in `config.json`, the inbox of the frame's panel
 `panel`, `orientation`, `sentBy`, `sentAt` and `deliveredAt` (`null` until
 the board acknowledges). There is no queue: a newer send for that panel
 replaces the frame, and leaves the other panel's inbox as it was. Sending needs a signed-in user (or `DEV_USER`)
-whose partner has a display.
+whose partner has a display. With `to: "all"` in the body (Broadcast) the frame
+goes to that panel's inbox of every display in `config.json` instead, no partner
+needed; the answer then has `to: "all"`. Any other `to` is refused with 400.
 
 ## The display's endpoints
 

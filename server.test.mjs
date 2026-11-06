@@ -483,6 +483,32 @@ test('send: needs a user with a partner who has a display', async () => {
   });
 });
 
+test('send: broadcast goes to every display, the sender\'s own included', async () => {
+  await withSendServer({}, async (base, { inboxDir }) => {
+    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+    const res = await sendImage(base, { name: saved, frame: whiteFrame.toString('base64'), to: 'all' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { sent: saved, to: 'all', panel: '1.54', orientation: 'landscape', devices: ['rod-display', 'ampy-display'] });
+    assert.deepEqual((await fs.readdir(inboxDir)).sort(), ['ampy-display.json', 'rod-display.json']);
+    for (const file of ['ampy-display.json', 'rod-display.json']) {
+      assert.equal(JSON.parse(await fs.readFile(path.join(inboxDir, file), 'utf8')).frame, saved, file);
+    }
+  });
+});
+
+test('send: broadcast needs no partner, and to is only "all"', async () => {
+  const body = { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') };
+  await withSendServer({ devUser: 'solo@example.com' }, async (base, { inboxDir }) => {
+    const res = await sendImage(base, { ...body, to: 'all' });
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.json()).devices, ['rod-display', 'ampy-display']);
+    assert.equal((await sendImage(base, { ...body, to: 'ampy-display' })).status, 400);
+  });
+  await withSendServer({ devUser: '' }, async (base) => {
+    assert.equal((await sendImage(base, { ...body, to: 'all' })).status, 403);
+  });
+});
+
 // Device endpoints: Rod (the stand-in user) sends, Ampy's display (the
 // stand-in device) fetches and acknowledges.
 const asAmpyDisplay = { devUser: 'rod@example.com', devDevice: 'ampy-display' };

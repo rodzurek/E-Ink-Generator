@@ -310,19 +310,30 @@ async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
 // The frame's length says which panel it is for. It is stored as
 // <stamp>-<width>.bin and becomes the current frame in that panel's inbox of
 // each of the partner's displays; a newer send for that panel replaces it.
+// With `to: "all"` (Broadcast) it goes to every display in config.json
+// instead, the sender's own included, and no partner is needed.
 async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   if (!user) return send(res, 403, { error: 'sending needs a signed-in user' });
   if (!imagesDir || !inboxDir) return send(res, 404, { error: 'image storage is off' });
-  const partner = user.partner ? config.users.get(user.partner) : null;
-  if (!partner) return send(res, 409, { error: 'you have no partner set in config.json' });
-  const owned = [...config.devices.values()].filter((d) => d.owner === partner.email);
-  if (!owned.length) return send(res, 409, { error: `${partner.name} has no display set in config.json` });
 
   let body;
   try {
     body = await readJson(req, MAX_SEND_BODY);
   } catch (e) {
     return send(res, 400, { error: e.message });
+  }
+  if (body.to !== undefined && body.to !== 'all') return send(res, 400, { error: 'to must be "all" or left out' });
+  const broadcast = body.to === 'all';
+  let partner = null;
+  let devices;
+  if (broadcast) {
+    devices = [...config.devices.values()];
+    if (!devices.length) return send(res, 409, { error: 'there is no display set in config.json' });
+  } else {
+    partner = user.partner ? config.users.get(user.partner) : null;
+    if (!partner) return send(res, 409, { error: 'you have no partner set in config.json' });
+    devices = [...config.devices.values()].filter((d) => d.owner === partner.email);
+    if (!devices.length) return send(res, 409, { error: `${partner.name} has no display set in config.json` });
   }
   const frame = Buffer.from(typeof body.frame === 'string' ? body.frame : '', 'base64');
   const panel = Object.keys(PANELS).find((id) => frameBytes(PANELS[id]) === frame.length);
@@ -335,7 +346,6 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   }
   const orientation = body.orientation === undefined ? DEFAULT_ORIENTATION : body.orientation;
   if (!ORIENTATIONS.includes(orientation)) return send(res, 400, { error: 'orientation must be landscape or portrait' });
-  const devices = owned;
   const hasName = body.name !== undefined;
   const hasImage = body.image !== undefined;
   if (hasName === hasImage) return send(res, 400, { error: 'send either the name of a stored image or an image' });
@@ -378,7 +388,7 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
     console.error(`could not send ${name}: ${e.message}`);
     return send(res, 500, { error: 'could not store the frame' });
   }
-  return send(res, 200, { sent: name, to: partner.name, panel, orientation, devices: devices.map((d) => d.id) });
+  return send(res, 200, { sent: name, to: broadcast ? 'all' : partner.name, panel, orientation, devices: devices.map((d) => d.id) });
 }
 
 // Which panel's frames each frame route hands out. The 1.54inch boards' firmware
