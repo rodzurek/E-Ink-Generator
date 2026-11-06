@@ -41,6 +41,8 @@ const HISTORY_LIMIT = 50;
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 // A base64 frame plus, for a converted image, its base64 PNG.
 const MAX_SEND_BODY = 1024 * 1024;
+// How long a preview stays before the display goes back to its frame from before.
+const PREVIEW_MS = 120_000;
 // Image generation is slow; give up before a proxy in front of us does.
 const UPSTREAM_TIMEOUT_MS = 180_000;
 
@@ -278,7 +280,8 @@ async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
     }
     for (const file of inboxes) {
       const entry = await readInbox(path.join(inboxDir, file)).catch(() => null);
-      if (entry?.frame === name) showing = true;
+      // A preview's earlier frame is kept too: the display goes back to it.
+      if (entry?.frame === name || entry?.previous?.frame === name) showing = true;
     }
   }
 
@@ -312,6 +315,8 @@ async function deleteGeneration(req, res, { imagesDir, inboxDir }) {
 // each of the partner's displays; a newer send for that panel replaces it.
 // With `to: "all"` (Broadcast) it goes to every display in config.json
 // instead, the sender's own included, and no partner is needed.
+// With `preview: true` the frame only stays PREVIEW_MS: the inbox keeps the
+// entry from before as `previous`, and the display gets it back (settleInbox).
 async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   if (!user) return send(res, 403, { error: 'sending needs a signed-in user' });
   if (!imagesDir || !inboxDir) return send(res, 404, { error: 'image storage is off' });
@@ -324,6 +329,8 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   }
   if (body.to !== undefined && body.to !== 'all') return send(res, 400, { error: 'to must be "all" or left out' });
   const broadcast = body.to === 'all';
+  if (body.preview !== undefined && typeof body.preview !== 'boolean') return send(res, 400, { error: 'preview must be true or false' });
+  const preview = body.preview === true;
   let partner = null;
   let devices;
   if (broadcast) {
@@ -377,18 +384,29 @@ async function sendFrame(req, res, { imagesDir, inboxDir, config, user }) {
   }
 
   const entry = { frame: name, panel, orientation, sentBy: user.email, sentAt: new Date().toISOString(), deliveredAt: null };
+  const revertAt = preview ? new Date(Date.now() + PREVIEW_MS).toISOString() : undefined;
   try {
     await fs.promises.writeFile(path.join(imagesDir, frameName(name, panel, orientation)), frame);
     await fs.promises.mkdir(inboxDir, { recursive: true });
     for (const device of devices) {
       const file = inboxFile(inboxDir, device, panel);
-      await withLock(file, () => writeAtomic(file, JSON.stringify(entry, null, 2) + '\n'));
+      await withLock(file, async () => {
+        let written = entry;
+        if (preview) {
+          const current = await readInbox(file).catch(() => null);
+          // A preview over a preview still goes back to the frame from before both.
+          const previous = current?.preview ? current.previous : current;
+          written = { ...entry, preview: true, revertAt, previous: previous ?? null };
+        }
+        await writeAtomic(file, JSON.stringify(written, null, 2) + '\n');
+      });
     }
   } catch (e) {
     console.error(`could not send ${name}: ${e.message}`);
     return send(res, 500, { error: 'could not store the frame' });
   }
-  return send(res, 200, { sent: name, to: broadcast ? 'all' : partner.name, panel, orientation, devices: devices.map((d) => d.id) });
+  const answer = { sent: name, to: broadcast ? 'all' : partner.name, panel, orientation, devices: devices.map((d) => d.id) };
+  return send(res, 200, preview ? { ...answer, preview: true, revertAt } : answer);
 }
 
 // Which panel's frames each frame route hands out. The 1.54inch boards' firmware
@@ -419,11 +437,24 @@ function parseFrameId(id) {
   return { panel, stamp: id.slice(0, id.length - PANEL_SUFFIX[panel].length) };
 }
 
+// The inbox entry, after a preview whose time is up has given way to the entry
+// from before it. That one comes back undelivered, so the display draws it
+// again and acknowledges. A preview with nothing before it just stays.
+async function settleInbox(file) {
+  return withLock(file, async () => {
+    const entry = await readInbox(file);
+    if (!entry?.preview || !entry.previous || Date.parse(entry.revertAt) > Date.now()) return entry;
+    const restored = { ...entry.previous, deliveredAt: null };
+    await writeAtomic(file, JSON.stringify(restored, null, 2) + '\n');
+    return restored;
+  });
+}
+
 // The display's current frame for the route's panel, unless it already has it
 // (?after=<frame id>) or nothing of that size was sent to it: then 204.
 // A device reads only its own inboxes.
 async function deviceFrame(res, url, { imagesDir, inboxDir, device, panel }) {
-  const entry = inboxDir ? await readInbox(inboxFile(inboxDir, device, panel)) : null;
+  const entry = inboxDir ? await settleInbox(inboxFile(inboxDir, device, panel)) : null;
   if (!entry || frameId(entry.frame, panel) === url.searchParams.get('after')) {
     res.writeHead(204, { 'cache-control': 'no-store' });
     return res.end();

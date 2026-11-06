@@ -509,6 +509,66 @@ test('send: broadcast needs no partner, and to is only "all"', async () => {
   });
 });
 
+// Moves a preview's rollback time into the past, as if its minute were up.
+async function expirePreview(file) {
+  const entry = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(file, JSON.stringify({ ...entry, revertAt: new Date(Date.now() - 1000).toISOString() }));
+}
+
+test('preview: shown for two minutes, then the display gets its frame from before back', async () => {
+  await withSendServer({ devUser: 'rod@example.com', devDevice: 'ampy-display' }, async (base, { inboxDir }) => {
+    const send = (extra) => sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64'), ...extra }).then((r) => r.json());
+    const before = (await send()).sent;
+    assert.equal((await ack(base, before)).status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const shown = await send({ preview: true });
+    assert.equal(shown.preview, true);
+    assert.ok(Math.abs(Date.parse(shown.revertAt) - Date.now() - 120_000) < 5000);
+    const file = path.join(inboxDir, 'ampy-display.json');
+    const res = await fetch(`${base}/api/device/frame?after=${before}`);
+    assert.equal(res.headers.get('x-frame-id'), shown.sent);
+
+    // A second preview still goes back to the frame from before both.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const again = await send({ preview: true });
+    assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).previous.frame, before);
+
+    await expirePreview(file);
+    const back = await fetch(`${base}/api/device/frame?after=${again.sent}`);
+    assert.equal(back.status, 200);
+    assert.equal(back.headers.get('x-frame-id'), before);
+    const restored = JSON.parse(await fs.readFile(file, 'utf8'));
+    assert.equal(restored.frame, before);
+    assert.equal(restored.deliveredAt, null);
+    assert.equal(restored.preview, undefined);
+  });
+});
+
+test('preview: a newer send ends it, and preview must be a boolean', async () => {
+  await withSendServer({ devUser: 'rod@example.com', devDevice: 'ampy-display' }, async (base, { inboxDir }) => {
+    const body = { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64') };
+    await sendImage(base, { ...body, preview: true });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const kept = (await (await sendImage(base, body)).json()).sent;
+    const file = path.join(inboxDir, 'ampy-display.json');
+    await expirePreview(file);
+    assert.equal((await fetch(`${base}/api/device/frame`)).headers.get('x-frame-id'), kept);
+    assert.equal((await sendImage(base, { ...body, preview: 'yes' })).status, 400);
+  });
+});
+
+test('preview: deleting the frame a preview goes back to keeps it', async () => {
+  await withSendServer({}, async (base, { imagesDir }) => {
+    const { saved } = await (await generate(base, { prompt: 'a fox' })).json();
+    await sendImage(base, { name: saved, frame: whiteFrame.toString('base64') });
+    await sendImage(base, { image: fakePng().toString('base64'), frame: whiteFrame.toString('base64'), preview: true });
+    const res = await fetch(`${base}/api/delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: saved }) });
+    assert.equal((await res.json()).frameKept, true);
+    await fs.access(path.join(imagesDir, `${saved}-240.bin`));
+  });
+});
+
 // Device endpoints: Rod (the stand-in user) sends, Ampy's display (the
 // stand-in device) fetches and acknowledges.
 const asAmpyDisplay = { devUser: 'rod@example.com', devDevice: 'ampy-display' };

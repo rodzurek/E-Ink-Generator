@@ -122,6 +122,12 @@ to every display in `config.json`, your own included. It needs a signed-in user
 but no partner. The frame still only lands in the inbox of its own panel, so a
 7.3 broadcast reaches the 7.3 boards and leaves the 1.54 inboxes as they were.
 
+**Preview 2 min** sends it to the partner's display for two minutes; after that
+the display goes back to what it showed before. The 7.3 board polls every 30
+seconds, so the preview appears within half a minute and the old image comes
+back within half a minute after the two minutes are up. A real send during the
+preview ends it: nothing is rolled back over a send.
+
 Both displays are Spectra 6 panels, so the frame is always reduced to the
 Spectra 6 inks, whatever the palette picklist shows; the dither setting is
 kept. The other palettes only change the preview and the download.
@@ -163,6 +169,14 @@ replaces the frame, and leaves the other panel's inbox as it was. Sending needs 
 whose partner has a display. With `to: "all"` in the body (Broadcast) the frame
 goes to that panel's inbox of every display in `config.json` instead, no partner
 needed; the answer then has `to: "all"`. Any other `to` is refused with 400.
+
+With `preview: true` the inbox entry also gets `preview: true`, `revertAt`
+(two minutes on, `PREVIEW_MS` in `server.js`) and `previous`, the entry it
+replaced; a preview over a preview keeps the first one's `previous`. The answer
+has `preview` and `revertAt`. Nothing runs on a timer: the first frame fetch
+after `revertAt` puts `previous` back as the inbox, undelivered, so the board
+draws it again and acknowledges it. A preview with nothing before it stays.
+Delete keeps a frame that a preview will go back to.
 
 ## The display's endpoints
 
