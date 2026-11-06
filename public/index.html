@@ -63,7 +63,7 @@
         <button id="go">Generate</button>
         <a class="button" id="download" hidden>Download PNG</a>
         <button id="send" hidden>Send</button>
-        <button id="preview" hidden title="Show it on their display for 2 minutes, then go back to what it showed before">Preview 2 min</button>
+        <button id="preview" hidden title="Check it on your own display for 2 minutes before sending it, then it goes back to what it showed before">Preview 2 min</button>
         <button id="broadcast" hidden title="Send to every display">Broadcast</button>
         <span class="muted" id="status"></span>
       </div>
@@ -191,8 +191,8 @@
     function render() {
       if (!source) return;
       ctx.putImageData(reduce(inks(), $('dither').checked), 0, 0);
-      $('send').hidden = $('preview').hidden = !partner;
-      $('broadcast').hidden = !signedIn;
+      $('send').hidden = !partner;
+      $('preview').hidden = $('broadcast').hidden = !signedIn;
       $('download').download = `eink-${source.width}x${source.height}.png`;
       canvas.toBlob((blob) => {
         const link = $('download');
@@ -222,12 +222,13 @@
     // from any other palette would come out wrong on the panel. The dither
     // setting is kept. The server takes the panel from the frame's length, and
     // puts it in that panel's inbox of each of the partner's displays, or of
-    // every display when broadcasting. A preview goes to the partner's
-    // displays for two minutes, then they go back to what they showed before.
-    // mode is 'send', 'preview' or 'broadcast'.
+    // every display when broadcasting. A preview goes to your own displays
+    // for two minutes, to check it before sending, then they go back to what
+    // they showed before. mode is 'send', 'preview' or 'broadcast'.
     async function sendFrame(mode) {
       const broadcast = mode === 'broadcast';
-      if (!source || !(broadcast ? signedIn : partner)) return;
+      const preview = mode === 'preview';
+      if (!source || !(broadcast || preview ? signedIn : partner)) return;
       const name = savedName;
       const image = reduce(PALETTES[SPECTRA_6], $('dither').checked);
       // The frame is the panel's own raster, so a portrait image is turned to it; the server gets the panel and orientation to route by.
@@ -244,16 +245,16 @@
         body.image = scratch.toDataURL('image/png').split(',')[1];
       }
       if (broadcast) body.to = 'all';
-      if (mode === 'preview') body.preview = true;
+      if (preview) body.preview = true;
       const buttons = ['send', 'preview', 'broadcast'].map($);
       for (const b of buttons) b.disabled = true;
-      $('status').textContent = broadcast ? 'sending to every display…' : `sending to ${partner.name}…`;
+      $('status').textContent = broadcast ? 'sending to every display…' : preview ? 'sending to your display…' : `sending to ${partner.name}…`;
       try {
         const res = await api('/api/send', { method: 'POST', headers, body: JSON.stringify(body) });
         const d = await res.json();
         if (d.error) throw new Error(d.error);
         $('status').textContent = broadcast ? `sent to every display (${d.devices.length})`
-          : d.preview ? `previewing on ${d.to}'s display until ${new Date(d.revertAt).toLocaleTimeString()}`
+          : d.preview ? `previewing on your display until ${new Date(d.revertAt).toLocaleTimeString()}`
           : `sent to ${d.to}'s display`;
       } catch (e) {
         $('status').textContent = `not sent: ${e.message}`;
@@ -397,8 +398,8 @@
         signedIn = Boolean(d.user);
         showDisplays(d.displays || []);
         if (partner) $('send').textContent = `Send to ${partner.name}`;
-        $('send').hidden = $('preview').hidden = !(partner && source);
-        $('broadcast').hidden = !(signedIn && source);
+        $('send').hidden = !(partner && source);
+        $('preview').hidden = $('broadcast').hidden = !(signedIn && source);
         $('info').textContent = d.ready ? 'colored e-ink images for the 1.54″ and 7.3″ displays' : 'OPENAI_API_KEY is not set on the server';
         for (const model of d.models) $('model').add(new Option(model, model));
         // Start on the last model picked in this browser, else the server's default.

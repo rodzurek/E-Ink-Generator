@@ -87,12 +87,13 @@
     // Packed again from the original, reduced to Spectra 6 and dithered as the
     // generator does by default: the stored copy may show another palette,
     // which would come out wrong on the panel. Broadcast sends it to every
-    // display instead of only the partner's; a preview goes to the partner's
-    // for two minutes. mode is 'send', 'preview' or 'broadcast'.
+    // display instead of only the partner's; a preview goes to your own
+    // display for two minutes, to check it before sending.
+    // mode is 'send', 'preview' or 'broadcast'.
     async function sendFrame(g, mode, buttons, status) {
       const broadcast = mode === 'broadcast';
       for (const b of buttons) b.disabled = true;
-      status.textContent = broadcast ? 'sending to every display…' : `sending to ${partner.name}…`;
+      status.textContent = broadcast ? 'sending to every display…' : mode === 'preview' ? 'sending to your display…' : `sending to ${partner.name}…`;
       try {
         const panel = PANELS[g.panel] ?? PANELS[DEFAULT_PANEL];
         const orientation = g.orientation ?? DEFAULT_ORIENTATION;
@@ -108,7 +109,7 @@
         const d = await res.json();
         if (d.error) throw new Error(d.error);
         status.textContent = broadcast ? `sent to every display (${d.devices.length})`
-          : d.preview ? `previewing on ${d.to}'s display until ${new Date(d.revertAt).toLocaleTimeString()}`
+          : d.preview ? `previewing on your display until ${new Date(d.revertAt).toLocaleTimeString()}`
           : `sent to ${d.to}'s display`;
       } catch (e) {
         status.textContent = `not sent: ${e.message}`;
@@ -174,12 +175,13 @@
       if (partner) {
         const send = element('button', `Send to ${partner.name}`);
         send.addEventListener('click', () => sendFrame(g, 'send', sending, status));
-        const preview = element('button', 'Preview 2 min');
-        preview.title = 'Show it on their display for 2 minutes, then go back to what it showed before';
-        preview.addEventListener('click', () => sendFrame(g, 'preview', sending, status));
-        sending.push(send, preview);
+        sending.push(send);
       }
       if (signedIn) {
+        const preview = element('button', 'Preview 2 min');
+        preview.title = 'Check it on your own display for 2 minutes before sending it, then it goes back to what it showed before';
+        preview.addEventListener('click', () => sendFrame(g, 'preview', sending, status));
+        sending.push(preview);
         const broadcast = element('button', 'Broadcast');
         broadcast.title = 'Send to every display';
         broadcast.addEventListener('click', () => sendFrame(g, 'broadcast', sending, status));
